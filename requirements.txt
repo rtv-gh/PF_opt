@@ -3,3 +3,5 @@ plotly
 streamlit
 yfinance
 PyPortfolioOpt
+cvxpy
+altair<5
