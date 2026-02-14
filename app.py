@@ -4,7 +4,7 @@ from backend import get_data, optimize_portfolio
 
 st.set_page_config(page_title="Smart Beta Optimizer", layout="wide")
 
-st.title("🎯 Smart Beta Portfolio Optimizer")
+st.title("🎯 Portfolio Optimizer")
 st.sidebar.header("User Inputs")
 
 # User Inputs

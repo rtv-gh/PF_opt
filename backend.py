@@ -2,7 +2,7 @@ import yfinance as yf
 from pypfopt import EfficientFrontier, risk_models, expected_returns
 
 def get_data(tickers, start_date, end_date):
-    data = yf.download(tickers, start=start_date, end=end_date)['Adj Close']
+    data = yf.download(tickers, start=start_date, end=end_date)['Close']
     return data
 
 def optimize_portfolio(data):
