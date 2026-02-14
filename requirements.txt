@@ -1,7 +1,7 @@
+streamlit>=1.30.0
+yfinance
 pandas
 plotly
-streamlit
-yfinance
 PyPortfolioOpt
 cvxpy
-altair<5
+altair>=5.0.0
