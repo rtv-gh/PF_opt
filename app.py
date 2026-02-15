@@ -8,7 +8,7 @@ st.title("🎯 Portfolio Optimizer")
 st.sidebar.header("User Inputs")
 
 # User Inputs
-tickers = st.sidebar.text_input("Enter Tickers (comma separated)", "AAPL, MSFT, GOOGL, AMZN, TSLA")
+tickers = st.sidebar.text_input("Enter Tickers (comma separated)", "C, MS, GS, JPM, BAC, WFC")
 start_date = st.sidebar.date_input("Start Date", value=None)
 
 if st.sidebar.button("Optimize"):
