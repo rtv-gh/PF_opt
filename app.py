@@ -2,7 +2,7 @@ import streamlit as st
 import plotly.express as px
 from backend import get_data, optimize_portfolio
 
-st.set_page_config(page_title="Smart Beta Optimizer", layout="wide")
+st.set_page_config(page_title="Portfolio Optimizer", layout="wide")
 
 st.title("🎯 Portfolio Optimizer")
 st.sidebar.header("User Inputs")
@@ -14,9 +14,6 @@ start_date = st.sidebar.date_input("Start Date", value=None)
 if st.sidebar.button("Optimize"):
     ticker_list = [t.strip().upper() for t in tickers.split(",")]
     
-    # Run the currency check
-    check_currencies(ticker_list)
-
     df = get_data(ticker_list, start_date, None)
     
     weights, perf = optimize_portfolio(df)
