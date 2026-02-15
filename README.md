@@ -1,9 +1,9 @@
-# 🎯 Smart Beta Portfolio Optimizer
+# 🎯 Portfolio Optimizer
 
 An interactive financial tool built in Python to demonstrate **Modern Portfolio Theory (MPT)** and **Efficient Frontier** optimization using real-market data.
 
 ## 🚀 Live Demo
-[Link to your Streamlit App URL]
+[tbc]
 
 ## 🛠️ The Financial Logic
 This project uses **Mean-Variance Optimization** to solve for the "Optimal" portfolio weights. 
