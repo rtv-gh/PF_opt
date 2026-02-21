@@ -1,7 +1,12 @@
+import sys
+from pathlib import Path
 import datetime
 import streamlit as st # pyright: ignore[reportMissingImports]
 import plotly.express as px # pyright: ignore[reportMissingImports]
-from backend import get_data, optimize_portfolio # pyright: ignore[reportMissingImports]
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from backend import get_data, optimize_portfolio
+
 
 st.set_page_config(page_title="Portfolio Optimizer", layout="wide")
 
@@ -10,9 +15,8 @@ st.sidebar.header("User Inputs")
 
 # Data caching
 @st.cache_data
-def get_data(ticker_list, start_date, end_date):
-    from backend import get_data as backend_get_data # pyright: ignore[reportMissingImports]
-    return backend_get_data(ticker_list, start_date, end_date)
+def cached_get_data(ticker_list, start_date, end_date):
+    return get_data(ticker_list, start_date, end_date)
 
 # User Inputs
 tickers = st.sidebar.text_input("Enter Tickers (comma separated)", value = "BAC, BK, C, GS, JPM, MS, SST, WFC")
@@ -28,7 +32,7 @@ if st.sidebar.button("Optimize"):
         st.error("Please enter at least one valid ticker.")
     else:
         try:
-            df = get_data(ticker_list, start_date, end_date)
+            df = cached_get_data(ticker_list, start_date, end_date)
             weights, perf = optimize_portfolio(df) # pyright: ignore[reportPossiblyUnboundVariable]
     
             # Display Results
