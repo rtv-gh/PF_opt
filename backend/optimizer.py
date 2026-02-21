@@ -1,19 +1,8 @@
+import numpy as np
+import pandas as pd
 import yfinance as yf # pyright: ignore[reportMissingImports]
 from pypfopt import EfficientFrontier, risk_models, expected_returns # pyright: ignore[reportMissingImports]
 
-def get_data(tickers, start_date, end_date):
-    # Validate date range (max 5 years)
-    max_days = 365 * 5
-    date_diff = (end_date - start_date).days
-    
-    if date_diff > max_days:
-        raise ValueError(
-            f"Date range exceeds maximum allowed period of 5 years. "
-            f"Requested: {date_diff} days, Maximum: {max_days} days."
-        )
-    
-    data = yf.download(tickers, start=start_date, end=end_date)['Close']
-    return data
 
 def optimize_portfolio(data):
     # Calculate expected returns and sample covariance
@@ -28,3 +17,18 @@ def optimize_portfolio(data):
     # Get performance metrics
     perf = ef.portfolio_performance(verbose=False)
     return cleaned_weights, perf
+
+def calculate_series_metrics(price_series):   #Calculates annualized return, volatility, and Sharpe ratio as SCALARS
+    # Annualized Return - Ensure we get a single float, not a Series
+    mu = expected_returns.mean_historical_return(price_series, returns_data=False)
+    if isinstance(mu, pd.Series):
+        mu = mu.iloc[0]  # Extract the single scalar value
+        
+    # Annualized Volatility
+    returns = price_series.pct_change().dropna()
+    sigma = returns.std() * np.sqrt(252)
+    
+    # Sharpe Ratio
+    sharpe = mu / sigma if sigma != 0 else 0
+    
+    return mu, sigma, sharpe
