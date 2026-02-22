@@ -1,15 +1,16 @@
 import sys
-import pandas as pd  
+import pandas as pd   # pyright: ignore[reportMissingModuleSource]
 from pathlib import Path
 import datetime
-import streamlit as st
-import plotly.express as px
+import streamlit as st # type: ignore
+import plotly.express as px # type: ignore
 
 # Ensure the backend package is discoverable
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import from backend directly
-from backend import (optimize_portfolio, calculate_series_metrics, get_data, get_bmk, get_fx)
+from backend import (optimize_portfolio, calculate_series_metrics, calculate_end_pf_weights, get_data, get_bmk, get_fx) # type: ignore
+from utils import load_index_metadata
 
 # Initialize session state keys if they don't exist
 if 'optimized_data' not in st.session_state:
@@ -25,7 +26,8 @@ def cached_get_data(ticker_list, start_date, end_date):
     return get_data(ticker_list, start_date, end_date)
 
 # User Inputs
-tickers = st.sidebar.text_input("Enter Tickers (comma separated)", value="BAC, BK, C, GS, JPM, MS, SST, WFC")
+# US Equity tickers -> AAPL,MA,META,V,AMZN,BA,BAC,BK,C,GS,JPM,MS,STT,WFC,LLY,BSX,JNJ,XOM,MDT,MSFT,GOOGL,NVDA,AVGO,CRM,UNH
+tickers = st.sidebar.text_input("Enter Tickers (comma separated)", value="AAPL,MA,META,V,AMZN,BA,BAC,BK,C,GS,JPM,MS,STT,WFC,LLY,BSX,JNJ,XOM,MDT,MSFT,GOOGL,NVDA,AVGO,CRM,UNH")
 
 st.sidebar.subheader("Benchmark")
 BENCHMARKS = {"S&P 500": "SPY", "MSCI ACWI": "ACWI"}
@@ -77,6 +79,8 @@ if st.sidebar.button("Optimize"):
                     "bmk_perf": bmk_perf,
                     "chart_data": chart_df, 
                     "benchmark_name": benchmark_name,
+                    "prices": df_prices,
+                    "ticker_list": ticker_list,
                 }
             else:
                 st.error("Could not retrieve benchmark data.")
@@ -84,17 +88,69 @@ if st.sidebar.button("Optimize"):
             st.error(f"⚠️ {str(e)}")
 
 
+
+
+
+
 # DISPLAY SECTION
 if st.session_state.optimized_data:
     data = st.session_state.optimized_data
     
     # 1. Weights Pie Chart
-    st.subheader("Max Sharpe Portfolio Weights")
+    st.subheader("Maximum Sharpe Portfolio Weights")
     fig_pie = px.pie(names=list(data["weights"].keys()), values=list(data["weights"].values()))
     st.plotly_chart(fig_pie)
 
+    # Holdings table: ticker, name, GICS Sector, weight start, weight end
+    st.subheader("Holdings: Ticker, Name, GICS Sector, Weights")
+
+    try:
+        # Retrieve stored objects
+        prices_df = st.session_state.optimized_data.get("prices")
+        weights = st.session_state.optimized_data.get("weights")
+
+        if prices_df is None or not weights:
+            st.info("Price data or optimized weights not available to build holdings table.")
+        else:
+            # Compute start and end weights using the helper
+            w_start, w_end = calculate_end_pf_weights(prices_df, weights)
+
+            if w_start.empty:
+                st.warning("No overlapping tickers between optimizer weights and price data.")
+            else:
+                # Build DataFrame
+                holdings = pd.DataFrame({
+                    "Weight Start": w_start,
+                    "Weight End": w_end
+                }).fillna(0)
+
+                # Load metadata and join
+                meta = load_index_metadata(sheet_name="SPX")
+                if not meta.empty:
+                    # Join on ticker index
+                    holdings = holdings.join(meta, how="left")
+
+                # Format percentages
+                holdings_display = holdings.copy()
+                holdings_display["Weight Start"] = holdings_display["Weight Start"].map("{:.2%}".format)
+                holdings_display["Weight End"] = holdings_display["Weight End"].map("{:.2%}".format)
+
+                # Reorder columns: Ticker, Security, GICS Sector, Weight Start, Weight End
+                cols = ["Weight Start", "Weight End"]
+                if "Security" in holdings_display.columns:
+                    cols = ["Security"] + cols
+                if "GICS Sector" in holdings_display.columns:
+                    cols = ["GICS Sector"] + cols
+
+                # Reset index to show ticker as a column
+                holdings_display = holdings_display.reset_index().rename(columns={"index": "Ticker"})
+                st.table(holdings_display[["Ticker"] + cols])
+    except Exception as e:
+        st.error(f"Failed to build holdings table: {e}")
+
+
 # 2. Performance Comparison Table
-    st.subheader("Simulated Analytics vs Benchmark")
+    st.subheader("Optimized Portfolio vs Benchmark")
 
     # Construct the comparison table
     comparison_df = pd.DataFrame({
@@ -115,5 +171,29 @@ if st.session_state.optimized_data:
     st.table(comparison_df)
     # 3. Normalized Cumulative Returns Chart
     st.divider()
-    st.subheader(f"Cumulative Return: Portfolio vs. {data['benchmark_name']} (%)")
-    st.line_chart(data["chart_data"] * 100)
+    st.subheader(f"Cumulative Return: Portfolio vs {data['benchmark_name']} (%)")
+    
+    fig = px.line(data["chart_data"] * 100,
+              x=data["chart_data"].index,
+              y=data["chart_data"].columns,
+              labels={"value": "Cumulative Return (%)", "index": "Date"},
+              #title=f"Cumulative Return: Portfolio vs {data['benchmark_name']} (%)",
+              template="plotly_white")
+
+    # Improve x-axis: show month abbrev and year on two lines, rotate for readability
+    fig.update_xaxes(
+        tickformat="%b\n%Y",   # e.g., "Feb\n2026"
+        tickangle=0,
+        tickmode="auto",
+        nticks=12,             # target number of ticks (adjust as needed)
+        showgrid=False
+    )
+
+    # Set explicit figure size (width used only when width="content")
+    fig.update_layout(width=1400, height=600, margin=dict(l=40, r=20, t=60, b=40))
+
+    # Render in Streamlit: use width="stretch" to fill the column, or width="content" to use fig.width
+    st.plotly_chart(fig, width="content")   # fills the container; height controlled by fig.update_layout(height=...)
+
+
+

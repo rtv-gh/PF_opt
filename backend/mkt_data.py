@@ -1,7 +1,7 @@
 from typing import Tuple, Dict, Optional, List
-import pandas as pd
-import numpy as np
-import yfinance as yf
+import pandas as pd # pyright: ignore[reportMissingModuleSource]
+import numpy as np # pyright: ignore[reportMissingImports]
+import yfinance as yf # pyright: ignore[reportMissingImports]
 from datetime import datetime
 
 BUSINESS_FREQ = "B"
