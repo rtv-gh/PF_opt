@@ -35,39 +35,126 @@ def generate_csv_holdings(holdings_display):
     return holdings_display.to_csv(index=False)
 
 
-def generate_excel_full_page(comparison_df, holdings_display, period_days):
+def generate_excel_full_page(comparison_df, holdings_display, period_days, fig_pie, fig_chart):
     """
-    Generate Excel workbook with all tables and metadata.
+    Generate Excel workbook with all tables and charts for Max Sharpe portfolio.
+    
+    Layout:
+    - Row 1: Title
+    - Row 2: Period info
+    - Row 3+: Summary returns table
+    - Below: Holdings table
+    - Bottom: Pie chart (left, 10x10) and Cumulative chart (right, 10x30) side by side
     
     Args:
         comparison_df: Performance comparison DataFrame
         holdings_display: Holdings table DataFrame
         period_days: Number of days in the analysis period
+        fig_pie: Plotly pie chart figure
+        fig_chart: Plotly cumulative return chart figure
     
     Returns:
         BytesIO object containing Excel workbook
     """
+    from openpyxl.drawing.image import Image as XLImage
+    from openpyxl.utils import get_column_letter
+    import copy
+    
     buffer = BytesIO()
+    
+    # Create copies of figures to avoid modifying originals
+    fig_pie_export = copy.deepcopy(fig_pie)
+    fig_chart_export = copy.deepcopy(fig_chart)
+    
+    # Ensure background is white and colors are visible
+    fig_pie_export.update_layout(
+        plot_bgcolor='white',
+        paper_bgcolor='white',
+        font=dict(color='black')
+    )
+    
+    fig_chart_export.update_layout(
+        plot_bgcolor='white',
+        paper_bgcolor='white',
+        font=dict(color='black')
+    )
+    
+    # Convert Plotly figures to PNG images in memory with proper settings
+    pie_image_bytes = BytesIO(fig_pie_export.to_image(format="png", width=400, height=400, scale=2))
+    pie_image_bytes.seek(0)
+    
+    chart_image_bytes = BytesIO(fig_chart_export.to_image(format="png", width=1000, height=500, scale=2))
+    chart_image_bytes.seek(0)
+    
+    # Create Excel workbook
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-        # Sheet 1: Performance Metrics
-        comparison_df.to_excel(writer, sheet_name='Performance', startrow=2)
-        ws_perf = writer.sheets['Performance']
-        ws_perf['A1'] = 'Portfolio Performance Analysis'
-        ws_perf['A2'] = f'Analysis Period: {period_days} days'
+        # Sheet 1: MaxSharpe (Main sheet with all portfolio output)
+        comparison_df.to_excel(writer, sheet_name='MaxSharpe', startrow=2, index=True)
+        ws_main = writer.sheets['MaxSharpe']
         
-        # Adjust column widths for performance sheet
+        # Add title and period info
+        ws_main['A1'] = 'Maximum Sharpe Portfolio Analysis'
+        ws_main['A2'] = f'Analysis Period: {period_days} days'
+        
+        # Adjust column widths for summary table
         for col_idx, col in enumerate(comparison_df.columns, 1):
             max_length = len(str(col))
             col_letter = get_column_letter(col_idx + 1)  # +1 for index column
             for val in comparison_df[col]:
                 max_length = max(max_length, len(str(val)))
-            ws_perf.column_dimensions[col_letter].width = min(max_length + 2, 50)
+            ws_main.column_dimensions[col_letter].width = min(max_length + 2, 50)
         
-        # Sheet 2: Holdings
+        # Calculate position for holdings table (below summary table)
+        summary_last_row = 3 + len(comparison_df)  # Row 3 is header, then data rows
+        holdings_header_row = summary_last_row + 2
+        holdings_data_start_row = holdings_header_row + 1
+        
+        # Add holdings header
+        ws_main[f'A{holdings_header_row}'] = 'Holdings'
+        
+        # Write holdings table to the sheet
+        for col_idx, col_name in enumerate(holdings_display.columns, 1):
+            ws_main.cell(row=holdings_data_start_row, column=col_idx, value=col_name)
+        
+        for row_idx, row_data in enumerate(holdings_display.values, holdings_data_start_row + 1):
+            for col_idx, value in enumerate(row_data, 1):
+                ws_main.cell(row=row_idx, column=col_idx, value=value)
+        
+        # Adjust column widths for holdings table
+        for col_idx, col in enumerate(holdings_display.columns, 1):
+            max_length = len(str(col))
+            col_letter = get_column_letter(col_idx)
+            for val in holdings_display[col]:
+                max_length = max(max_length, len(str(val)))
+            ws_main.column_dimensions[col_letter].width = min(max_length + 2, 50)
+        
+        # Calculate position for charts (below holdings table)
+        holdings_last_row = holdings_data_start_row + len(holdings_display)
+        charts_header_row = holdings_last_row + 2
+        charts_data_row = charts_header_row + 1
+        
+        # Add charts header
+        ws_main[f'A{charts_header_row}'] = 'Portfolio Allocation & Performance'
+        
+        # Add pie chart on the left (column A)
+        # Dimensions: 10x10 (in EMUs: 1cm ≈ 360000 EMUs, so 10cm ≈ 3,600,000 EMUs)
+        pie_img = XLImage(pie_image_bytes)
+        pie_img.width = int(400)   # 10 cm width
+        pie_img.height = int(400)  # 10 cm height
+        ws_main.add_image(pie_img, f'A{charts_data_row}')
+        
+        # Add cumulative chart on the right (column E, giving space for pie chart)
+        # Dimensions: 30x10 (30cm wide, 10cm tall)
+        chart_img = XLImage(chart_image_bytes)
+        chart_img.width = int(1200)   # 30 cm width
+        chart_img.height = int(400)  # 10 cm height
+        ws_main.add_image(chart_img, f'E{charts_data_row}')
+        
+        # Sheet 2: Holdings (reference sheet)
         holdings_display.to_excel(writer, sheet_name='Holdings', index=False)
         ws_holdings = writer.sheets['Holdings']
         
-        # Adjust column widths for holdings
+        # Adjust column widths for holdings sheet
         for col_idx, col in enumerate(holdings_display.columns, 1):
             max_length = len(str(col))
             col_letter = get_column_letter(col_idx)
@@ -139,7 +226,7 @@ if st.sidebar.button("Optimize"):
                 # FIXED: Created missing bmk_cum_rets and chart_df
                 bmk_cum_rets = (bmk_series / bmk_series.iloc[0]) - 1
                 chart_df = pd.DataFrame({
-                    "Portfolio": port_cum_rets,
+                    "Max Sharpe PF": port_cum_rets,
                     "Benchmark": bmk_cum_rets
                 }).fillna(0)
 
@@ -179,8 +266,19 @@ if st.session_state.optimized_data:
         weights_filtered = {ticker: weight for ticker, weight in data["weights"].items() if weight > 0}
         
         if weights_filtered:
-            fig_pie = px.pie(names=list(weights_filtered.keys()), values=list(weights_filtered.values()))
-            fig_pie.update_layout(width=400, height=400, showlegend=True)
+            # Create pie chart with explicit color palette
+            fig_pie = px.pie(
+                names=list(weights_filtered.keys()), 
+                values=list(weights_filtered.values()),
+                color_discrete_sequence=px.colors.qualitative.Plotly
+            )
+            fig_pie.update_layout(
+                width=400, 
+                height=400, 
+                showlegend=True,
+                plot_bgcolor='white',
+                paper_bgcolor='white'
+            )
             st.plotly_chart(fig_pie, width="content")
         else:
             st.warning("No stocks with positive weights in portfolio.")
@@ -337,7 +435,12 @@ if st.session_state.optimized_data:
     )
 
     # Set explicit figure size (width used only when width="content")
-    fig.update_layout(width=1400, height=600, margin=dict(l=40, r=20, t=60, b=40))
+    fig.update_layout(
+        width=1400, 
+        height=600, 
+        margin=dict(l=40, r=20, t=60, b=40),
+        legend=dict(x=0, y=1, xanchor="left", yanchor="top")
+    )
 
     # Render in Streamlit: use width="stretch" to fill the column, or width="content" to use fig.width
     st.plotly_chart(fig, width="content")   # fills the container; height controlled by fig.update_layout(height=...)
@@ -415,8 +518,9 @@ if st.session_state.optimized_data:
             holdings_export_display = holdings_export_display.reset_index().rename(columns={"index": "Ticker"})
             holdings_export_final = holdings_export_display[["Ticker"] + cols]
             
-            # Generate Excel file
-            excel_buffer = generate_excel_full_page(comparison_export, holdings_export_final, period_days)
+            # Generate Excel file with chart figures
+            # Note: fig_pie and fig are already created earlier in the display section
+            excel_buffer = generate_excel_full_page(comparison_export, holdings_export_final, period_days, fig_pie, fig)
             
             # Excel export button
             st.download_button(
