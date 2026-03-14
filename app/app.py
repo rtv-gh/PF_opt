@@ -175,9 +175,15 @@ if st.session_state.optimized_data:
     st.subheader("Maximum Sharpe Portfolio Weights")
     col_pie, col_spacer = st.columns([1.2, 2])
     with col_pie:
-        fig_pie = px.pie(names=list(data["weights"].keys()), values=list(data["weights"].values()))
-        fig_pie.update_layout(width=400, height=400, showlegend=True)
-        st.plotly_chart(fig_pie, width="content")
+        # Filter weights to only show stocks with weight > 0%
+        weights_filtered = {ticker: weight for ticker, weight in data["weights"].items() if weight > 0}
+        
+        if weights_filtered:
+            fig_pie = px.pie(names=list(weights_filtered.keys()), values=list(weights_filtered.values()))
+            fig_pie.update_layout(width=400, height=400, showlegend=True)
+            st.plotly_chart(fig_pie, width="content")
+        else:
+            st.warning("No stocks with positive weights in portfolio.")
 
     # Holdings table: ticker, name, GICS Sector, weight start, weight end
     st.subheader("Holdings: Ticker, Name, GICS Sector, Weights")
