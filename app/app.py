@@ -4,6 +4,9 @@ from pathlib import Path
 import datetime
 import streamlit as st # type: ignore
 import plotly.express as px # type: ignore
+from io import BytesIO
+import openpyxl  # pyright: ignore[reportMissingImports]
+from openpyxl.utils import get_column_letter  # pyright: ignore[reportMissingImports]
 
 # Ensure the backend package is discoverable
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -24,6 +27,56 @@ st.sidebar.header("User Inputs")
 @st.cache_data
 def cached_get_data(ticker_list, start_date, end_date):
     return get_data(ticker_list, start_date, end_date)
+
+
+# Export utility functions
+def generate_csv_holdings(holdings_display):
+    """Generate CSV for holdings table"""
+    return holdings_display.to_csv(index=False)
+
+
+def generate_excel_full_page(comparison_df, holdings_display, period_days):
+    """
+    Generate Excel workbook with all tables and metadata.
+    
+    Args:
+        comparison_df: Performance comparison DataFrame
+        holdings_display: Holdings table DataFrame
+        period_days: Number of days in the analysis period
+    
+    Returns:
+        BytesIO object containing Excel workbook
+    """
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+        # Sheet 1: Performance Metrics
+        comparison_df.to_excel(writer, sheet_name='Performance', startrow=2)
+        ws_perf = writer.sheets['Performance']
+        ws_perf['A1'] = 'Portfolio Performance Analysis'
+        ws_perf['A2'] = f'Analysis Period: {period_days} days'
+        
+        # Adjust column widths for performance sheet
+        for col_idx, col in enumerate(comparison_df.columns, 1):
+            max_length = len(str(col))
+            col_letter = get_column_letter(col_idx + 1)  # +1 for index column
+            for val in comparison_df[col]:
+                max_length = max(max_length, len(str(val)))
+            ws_perf.column_dimensions[col_letter].width = min(max_length + 2, 50)
+        
+        # Sheet 2: Holdings
+        holdings_display.to_excel(writer, sheet_name='Holdings', index=False)
+        ws_holdings = writer.sheets['Holdings']
+        
+        # Adjust column widths for holdings
+        for col_idx, col in enumerate(holdings_display.columns, 1):
+            max_length = len(str(col))
+            col_letter = get_column_letter(col_idx)
+            for val in holdings_display[col]:
+                max_length = max(max_length, len(str(val)))
+            ws_holdings.column_dimensions[col_letter].width = min(max_length + 2, 50)
+    
+    buffer.seek(0)
+    return buffer
 
 # User Inputs
 # US Equity tickers -> AAPL,MA,META,V,AMZN,BA,BAC,BK,C,GS,JPM,MS,STT,WFC,LLY,BSX,JNJ,XOM,MDT,MSFT,GOOGL,NVDA,AVGO,CRM,UNH
@@ -118,10 +171,13 @@ if st.sidebar.button("Optimize"):
 if st.session_state.optimized_data:
     data = st.session_state.optimized_data
     
-    # 1. Weights Pie Chart
+    # 1. Weights Pie Chart (Left-aligned and narrower)
     st.subheader("Maximum Sharpe Portfolio Weights")
-    fig_pie = px.pie(names=list(data["weights"].keys()), values=list(data["weights"].values()))
-    st.plotly_chart(fig_pie)
+    col_pie, col_spacer = st.columns([1.2, 2])
+    with col_pie:
+        fig_pie = px.pie(names=list(data["weights"].keys()), values=list(data["weights"].values()))
+        fig_pie.update_layout(width=400, height=400, showlegend=True)
+        st.plotly_chart(fig_pie, width="content")
 
     # Holdings table: ticker, name, GICS Sector, weight start, weight end
     st.subheader("Holdings: Ticker, Name, GICS Sector, Weights")
@@ -182,6 +238,16 @@ if st.session_state.optimized_data:
                     },
                     width="content",
                     hide_index=True
+                )
+                
+                # CSV Export button for holdings
+                csv_data = generate_csv_holdings(holdings_display[["Ticker"] + cols])
+                st.download_button(
+                    label="📥 Download Holdings as CSV",
+                    data=csv_data,
+                    file_name="portfolio_holdings.csv",
+                    mime="text/csv",
+                    key="holdings_csv"
                 )
     except Exception as e:
         st.error(f"Failed to build holdings table: {e}")
@@ -269,6 +335,93 @@ if st.session_state.optimized_data:
 
     # Render in Streamlit: use width="stretch" to fill the column, or width="content" to use fig.width
     st.plotly_chart(fig, width="content")   # fills the container; height controlled by fig.update_layout(height=...)
+
+    # Export Full Page to Excel
+    st.divider()
+    st.subheader("📊 Export Results")
+    
+    # Build export data structures from session data
+    try:
+        # Rebuild comparison dataframe for export
+        period_days = data.get("period_days", 365)
+        annualize = period_days >= 365
+
+        if annualize:
+            comparison_export = pd.DataFrame({
+                "Portfolio": [
+                    f"{data['port_period_metrics'][0]:.1%}",
+                    f"{data['port_perf'][0]:.1%}",
+                    f"{data['port_perf'][1]:.1%}",
+                    f"{data['port_perf'][2]:.2f}",
+                    f"{data['tracking_error']:.1%}"
+                ],
+                "Benchmark": [
+                    f"{data['bmk_period_metrics'][0]:.1%}",
+                    f"{data['bmk_perf'][0]:.1%}",
+                    f"{data['bmk_perf'][1]:.1%}",
+                    f"{data['bmk_perf'][2]:.2f}",
+                    "-"
+                ]
+            }, index=["Cumulative Return", "Annualised Return", "Annualised Volatility", "Sharpe Ratio", "Tracking Error"])
+        else:
+            comparison_export = pd.DataFrame({
+                "Portfolio": [
+                    f"{data['port_period_metrics'][0]:.1%}",
+                    f"{data['port_period_metrics'][1]:.1%}",
+                    f"{data['port_period_metrics'][2]:.2f}",
+                    f"{data['tracking_error']:.1%}"
+                ],
+                "Benchmark": [
+                    f"{data['bmk_period_metrics'][0]:.1%}",
+                    f"{data['bmk_period_metrics'][1]:.1%}",
+                    f"{data['bmk_period_metrics'][2]:.2f}",
+                    "-"
+                ]
+            }, index=["Cumulative Return", "Period Volatility", "Period Sharpe", "Tracking Error"])
+        
+        # Rebuild holdings table for export
+        prices_df = data.get("prices")
+        weights = data.get("weights")
+        
+        if prices_df is not None and weights:
+            w_start, w_end = calculate_end_pf_weights(prices_df, weights)
+            
+            holdings_export = pd.DataFrame({
+                "Weight Start": w_start,
+                "Weight End": w_end
+            }).fillna(0)
+            
+            meta = load_index_metadata(sheet_name="SPX")
+            if not meta.empty:
+                holdings_export = holdings_export.join(meta, how="left")
+            
+            holdings_export = holdings_export.sort_values("Weight Start", ascending=False)
+            holdings_export_display = holdings_export.copy()
+            holdings_export_display["Weight Start"] = holdings_export_display["Weight Start"].map("{:.2%}".format)
+            holdings_export_display["Weight End"] = holdings_export_display["Weight End"].map("{:.2%}".format)
+            
+            cols = ["Weight Start", "Weight End"]
+            if "Security" in holdings_export_display.columns:
+                cols = ["Security"] + cols
+            if "GICS Sector" in holdings_export_display.columns:
+                cols = ["GICS Sector"] + cols
+            
+            holdings_export_display = holdings_export_display.reset_index().rename(columns={"index": "Ticker"})
+            holdings_export_final = holdings_export_display[["Ticker"] + cols]
+            
+            # Generate Excel file
+            excel_buffer = generate_excel_full_page(comparison_export, holdings_export_final, period_days)
+            
+            # Excel export button
+            st.download_button(
+                label="📊 Download Full Report as Excel",
+                data=excel_buffer,
+                file_name="portfolio_report.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="full_export_excel"
+            )
+    except Exception as e:
+        st.warning(f"Export functionality: {str(e)}")
 
 
 
