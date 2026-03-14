@@ -18,20 +18,59 @@ def optimize_portfolio(data):
     perf = ef.portfolio_performance(verbose=False)
     return cleaned_weights, perf
 
-def calculate_series_metrics(price_series):   #Calculates annualized return, volatility, and Sharpe ratio as SCALARS
-    # Annualized Return - Ensure we get a single float, not a Series
+def calculate_series_metrics(price_series, annualize=True):   
+    """
+    Calculates return, volatility, and Sharpe ratio.
+    
+    Args:
+        price_series: Series of prices
+        annualize: If True, annualize metrics. If False, return period metrics.
+    
+    Returns:
+        tuple: (return, volatility, sharpe) as SCALARS
+    """
+    # Return - Ensure we get a single float, not a Series
     mu = expected_returns.mean_historical_return(price_series, returns_data=False)
     if isinstance(mu, pd.Series):
         mu = mu.iloc[0]  # Extract the single scalar value
         
-    # Annualized Volatility
+    # Volatility
     returns = price_series.pct_change().dropna()
     sigma = returns.std() * np.sqrt(252)
     
     # Sharpe Ratio
     sharpe = mu / sigma if sigma != 0 else 0
     
+    # If not annualizing, convert annualized metrics back to period metrics
+    if not annualize:
+        num_periods = len(returns) / 252
+        mu = (1 + mu) ** num_periods - 1
+        sigma = sigma / np.sqrt(252 / num_periods)
+        sharpe = mu / sigma if sigma != 0 else 0
+    
     return mu, sigma, sharpe
+
+
+def calculate_tracking_error(portfolio_returns, benchmark_returns):
+    """
+    Calculate annualized tracking error between portfolio and benchmark.
+    
+    Args:
+        portfolio_returns: Series of portfolio daily returns
+        benchmark_returns: Series of benchmark daily returns
+    
+    Returns:
+        float: Annualized tracking error as a scalar
+    """
+    # Ensure same length and alignment
+    common_dates = portfolio_returns.index.intersection(benchmark_returns.index)
+    pf_ret = portfolio_returns.loc[common_dates]
+    bmk_ret = benchmark_returns.loc[common_dates]
+    
+    # Tracking error = std dev of (pf returns - bmk returns)
+    tracking_error = (pf_ret - bmk_ret).std() * np.sqrt(252)
+    
+    return tracking_error
 
 
 def calculate_end_pf_weights(prices_df, weights):

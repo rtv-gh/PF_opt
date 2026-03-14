@@ -9,7 +9,7 @@ import plotly.express as px # type: ignore
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import from backend directly
-from backend import (optimize_portfolio, calculate_series_metrics, calculate_end_pf_weights, get_data, get_bmk, get_fx) # type: ignore
+from backend import (optimize_portfolio, calculate_series_metrics, calculate_end_pf_weights, get_data, get_bmk, get_fx, calculate_tracking_error) # type: ignore
 from utils import load_index_metadata
 
 # Initialize session state keys if they don't exist
@@ -49,6 +49,9 @@ if st.sidebar.button("Optimize"):
         st.error("Please enter at least one valid ticker.")
     else:
         try:
+            # Calculate period length in days
+            period_days = (end_date - start_date).days
+            
             # 1. Portfolio Optimization
             df_prices = cached_get_data(ticker_list, start_date, end_date)
             weights, port_perf = optimize_portfolio(df_prices)
@@ -63,7 +66,14 @@ if st.sidebar.button("Optimize"):
             
             if not bmk_df.empty:  
                 bmk_series = bmk_df["benchmark_adj_close_converted"]
-                bmk_perf = calculate_series_metrics(bmk_series)
+                bmk_daily_rets = bmk_series.pct_change().dropna()
+                
+                # Calculate metrics with conditional annualization
+                annualize = period_days >= 365
+                bmk_perf = calculate_series_metrics(bmk_series, annualize=annualize)
+                
+                # Calculate tracking error (always annualized)
+                tracking_error = calculate_tracking_error(port_daily_rets, bmk_daily_rets)
                 
                 # FIXED: Created missing bmk_cum_rets and chart_df
                 bmk_cum_rets = (bmk_series / bmk_series.iloc[0]) - 1
@@ -81,6 +91,8 @@ if st.sidebar.button("Optimize"):
                     "benchmark_name": benchmark_name,
                     "prices": df_prices,
                     "ticker_list": ticker_list,
+                    "period_days": period_days,
+                    "tracking_error": tracking_error,
                 }
             else:
                 st.error("Could not retrieve benchmark data.")
@@ -130,6 +142,9 @@ if st.session_state.optimized_data:
                     # Join on ticker index
                     holdings = holdings.join(meta, how="left")
 
+                # Sort by Weight Start (descending) on the original holdings before formatting
+                holdings = holdings.sort_values("Weight Start", ascending=False)
+                
                 # Format percentages
                 holdings_display = holdings.copy()
                 holdings_display["Weight Start"] = holdings_display["Weight Start"].map("{:.2%}".format)
@@ -152,23 +167,39 @@ if st.session_state.optimized_data:
 # 2. Performance Comparison Table
     st.subheader("Optimized Portfolio vs Benchmark")
 
+    # Determine if metrics are annualized
+    period_days = data.get("period_days", 365)
+    annualize = period_days >= 365
+    return_label = "Annual Return" if annualize else "Period Return"
+    vol_label = "Annual Volatility" if annualize else "Period Volatility"
+
     # Construct the comparison table
     comparison_df = pd.DataFrame({
         "Portfolio": [
             f"{data['port_perf'][0]:.1%}",  # Return
             f"{data['port_perf'][1]:.1%}",  # Volatility
-            f"{data['port_perf'][2]:.2f}"   # Sharpe
+            f"{data['port_perf'][2]:.2f}",  # Sharpe
+            f"{data['tracking_error']:.1%}"  # Tracking Error
         ],
         "Benchmark": [
             f"{data['bmk_perf'][0]:.1%}",   # Return
             f"{data['bmk_perf'][1]:.1%}",   # Volatility
-            f"{data['bmk_perf'][2]:.2f}"    # Sharpe
+            f"{data['bmk_perf'][2]:.2f}",   # Sharpe
+            "-"  # No tracking error for benchmark
         ]
         
-    }, index=["Annual Return", "Annual Volatility", "Sharpe Ratio"])
+    }, index=[return_label, vol_label, "Sharpe Ratio", "Tracking Error"])
 
-    # Display as a static table (cleaner for 3x3 metrics than a scrollable dataframe)
-    st.table(comparison_df)
+    # Display with narrower columns using column_config
+    st.dataframe(
+        comparison_df,
+        column_config={
+            "Portfolio": st.column_config.TextColumn(width="small"),
+            "Benchmark": st.column_config.TextColumn(width="small"),
+        },
+        width="content",
+        hide_index=False
+    )
     # 3. Normalized Cumulative Returns Chart
     st.divider()
     st.subheader(f"Cumulative Return: Portfolio vs {data['benchmark_name']} (%)")
