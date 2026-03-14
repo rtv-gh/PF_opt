@@ -9,7 +9,7 @@ import plotly.express as px # type: ignore
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import from backend directly
-from backend import (optimize_portfolio, calculate_series_metrics, calculate_end_pf_weights, get_data, get_bmk, get_fx, calculate_tracking_error) # type: ignore
+from backend import (optimize_portfolio, calculate_series_metrics, calculate_end_pf_weights, get_data, get_bmk, get_fx, calculate_tracking_error, calculate_period_metrics) # type: ignore
 from utils import load_index_metadata
 
 # Initialize session state keys if they don't exist
@@ -75,6 +75,14 @@ if st.sidebar.button("Optimize"):
                 # Calculate tracking error (always annualized)
                 tracking_error = calculate_tracking_error(port_daily_rets, bmk_daily_rets)
                 
+                # Calculate cumulative returns
+                port_cum_ret_final = (1 + port_daily_rets).prod() - 1
+                bmk_cum_ret_final = (1 + bmk_daily_rets).prod() - 1
+                
+                # Calculate period metrics (for short periods) and store annualized metrics
+                port_period_metrics = calculate_period_metrics(port_daily_rets, port_cum_ret_final, len(port_daily_rets))
+                bmk_period_metrics = calculate_period_metrics(bmk_daily_rets, bmk_cum_ret_final, len(bmk_daily_rets))
+                
                 # FIXED: Created missing bmk_cum_rets and chart_df
                 bmk_cum_rets = (bmk_series / bmk_series.iloc[0]) - 1
                 chart_df = pd.DataFrame({
@@ -85,8 +93,10 @@ if st.sidebar.button("Optimize"):
                 # 4. Save to Session State
                 st.session_state.optimized_data = {
                     "weights": weights,
-                    "port_perf": port_perf,
-                    "bmk_perf": bmk_perf,
+                    "port_perf": port_perf,  # annualized metrics from optimizer
+                    "bmk_perf": bmk_perf,  # conditional annualization
+                    "port_period_metrics": port_period_metrics,  # period metrics for short periods
+                    "bmk_period_metrics": bmk_period_metrics,  # period metrics for short periods
                     "chart_data": chart_df, 
                     "benchmark_name": benchmark_name,
                     "prices": df_prices,
@@ -170,25 +180,41 @@ if st.session_state.optimized_data:
     # Determine if metrics are annualized
     period_days = data.get("period_days", 365)
     annualize = period_days >= 365
-    return_label = "Annual Return" if annualize else "Period Return"
-    vol_label = "Annual Volatility" if annualize else "Period Volatility"
 
-    # Construct the comparison table
-    comparison_df = pd.DataFrame({
-        "Portfolio": [
-            f"{data['port_perf'][0]:.1%}",  # Return
-            f"{data['port_perf'][1]:.1%}",  # Volatility
-            f"{data['port_perf'][2]:.2f}",  # Sharpe
-            f"{data['tracking_error']:.1%}"  # Tracking Error
-        ],
-        "Benchmark": [
-            f"{data['bmk_perf'][0]:.1%}",   # Return
-            f"{data['bmk_perf'][1]:.1%}",   # Volatility
-            f"{data['bmk_perf'][2]:.2f}",   # Sharpe
-            "-"  # No tracking error for benchmark
-        ]
-        
-    }, index=[return_label, vol_label, "Sharpe Ratio", "Tracking Error"])
+    if annualize:
+        # Long period: show annualized metrics
+        comparison_df = pd.DataFrame({
+            "Portfolio": [
+                f"{data['port_period_metrics'][0]:.1%}",  # Cumulative Return
+                f"{data['port_perf'][0]:.1%}",  # Annualized Return
+                f"{data['port_perf'][1]:.1%}",  # Annualized Volatility
+                f"{data['port_perf'][2]:.2f}",  # Sharpe Ratio
+                f"{data['tracking_error']:.1%}"  # Annualized Tracking Error
+            ],
+            "Benchmark": [
+                f"{data['bmk_period_metrics'][0]:.1%}",  # Cumulative Return
+                f"{data['bmk_perf'][0]:.1%}",  # Annualized Return
+                f"{data['bmk_perf'][1]:.1%}",  # Annualized Volatility
+                f"{data['bmk_perf'][2]:.2f}",  # Sharpe Ratio
+                "-"  # No tracking error for benchmark
+            ]
+        }, index=["Cumulative Return", "Annual Return", "Annual Volatility", "Sharpe Ratio", "Tracking Error"])
+    else:
+        # Short period: show period metrics and annualized tracking error
+        comparison_df = pd.DataFrame({
+            "Portfolio": [
+                f"{data['port_period_metrics'][0]:.1%}",  # Cumulative Return
+                f"{data['port_period_metrics'][1]:.1%}",  # Period Volatility
+                f"{data['port_period_metrics'][2]:.2f}",  # Period Sharpe
+                f"{data['tracking_error']:.1%}"  # Annualized Tracking Error
+            ],
+            "Benchmark": [
+                f"{data['bmk_period_metrics'][0]:.1%}",  # Cumulative Return
+                f"{data['bmk_period_metrics'][1]:.1%}",  # Period Volatility
+                f"{data['bmk_period_metrics'][2]:.2f}",  # Period Sharpe
+                "-"  # No tracking error for benchmark
+            ]
+        }, index=["Cumulative Return", "Period Volatility", "Period Sharpe", "Tracking Error"])
 
     # Display with narrower columns using column_config
     st.dataframe(
@@ -218,6 +244,11 @@ if st.session_state.optimized_data:
         tickmode="auto",
         nticks=12,             # target number of ticks (adjust as needed)
         showgrid=False
+    )
+
+    # Set hover template to show 2 decimals
+    fig.update_traces(
+        hovertemplate="<b>%{fullData.name}</b><br>Date: %{x|%Y-%m-%d}<br>Return: %{y:.2f}%<extra></extra>"
     )
 
     # Set explicit figure size (width used only when width="content")

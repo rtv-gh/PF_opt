@@ -73,6 +73,31 @@ def calculate_tracking_error(portfolio_returns, benchmark_returns):
     return tracking_error
 
 
+def calculate_period_metrics(returns_series, cumulative_return, num_trading_days=None):
+    """
+    Calculate non-annualized (period) metrics for returns over a specific period.
+    
+    Args:
+        returns_series: Series of daily returns
+        cumulative_return: The final cumulative return over the period
+        num_trading_days: Number of trading days (optional, defaults to len(returns_series))
+    
+    Returns:
+        tuple: (cumulative_return, period_volatility, period_sharpe) as SCALARS
+    """
+    if num_trading_days is None:
+        num_trading_days = len(returns_series)
+    
+    # Period volatility: scale daily volatility by sqrt of trading days
+    daily_vol = returns_series.std()
+    period_vol = daily_vol * np.sqrt(num_trading_days)
+    
+    # Period Sharpe: cumulative return / period volatility
+    period_sharpe = cumulative_return / period_vol if period_vol != 0 else 0
+    
+    return cumulative_return, period_vol, period_sharpe
+
+
 def calculate_end_pf_weights(prices_df, weights):
     """
     Calculate start and end portfolio weights.
