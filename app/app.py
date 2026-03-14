@@ -176,7 +176,7 @@ if st.session_state.optimized_data:
                     column_config={
                         "Ticker": st.column_config.TextColumn(width="small"),
                         "Security": st.column_config.TextColumn(width="medium"),
-                        "GICS Sector": st.column_config.TextColumn(width="small"),
+                        "GICS Sector": st.column_config.TextColumn(width="medium"),
                         "Weight Start": st.column_config.TextColumn(width="small"),
                         "Weight End": st.column_config.TextColumn(width="small"),
                     },
@@ -188,7 +188,7 @@ if st.session_state.optimized_data:
 
 
 # 2. Performance Comparison Table
-    st.subheader("Optimized Portfolio vs Benchmark")
+    st.subheader("Max Sharpe Portfolio vs Benchmark")
 
     # Determine if metrics are annualized
     period_days = data.get("period_days", 365)
@@ -241,7 +241,7 @@ if st.session_state.optimized_data:
     )
     # 3. Normalized Cumulative Returns Chart
     st.divider()
-    st.subheader(f"Cumulative Return: Portfolio vs {data['benchmark_name']} (%)")
+    st.subheader(f"Cumulative Return: Max Sharpe Portfolio vs {data['benchmark_name']} (%)")
     
     fig = px.line(data["chart_data"] * 100,
               x=data["chart_data"].index,
