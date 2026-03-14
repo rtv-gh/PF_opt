@@ -169,7 +169,20 @@ if st.session_state.optimized_data:
 
                 # Reset index to show ticker as a column
                 holdings_display = holdings_display.reset_index().rename(columns={"index": "Ticker"})
-                st.table(holdings_display[["Ticker"] + cols])
+                
+                # Display with narrower columns
+                st.dataframe(
+                    holdings_display[["Ticker"] + cols],
+                    column_config={
+                        "Ticker": st.column_config.TextColumn(width="small"),
+                        "Security": st.column_config.TextColumn(width="medium"),
+                        "GICS Sector": st.column_config.TextColumn(width="small"),
+                        "Weight Start": st.column_config.TextColumn(width="small"),
+                        "Weight End": st.column_config.TextColumn(width="small"),
+                    },
+                    width="content",
+                    hide_index=True
+                )
     except Exception as e:
         st.error(f"Failed to build holdings table: {e}")
 
@@ -198,7 +211,7 @@ if st.session_state.optimized_data:
                 f"{data['bmk_perf'][2]:.2f}",  # Sharpe Ratio
                 "-"  # No tracking error for benchmark
             ]
-        }, index=["Cumulative Return", "Annual Return", "Annual Volatility", "Sharpe Ratio", "Tracking Error"])
+        }, index=["Cumulative Return", "Annualised Return", "Annualised Volatility", "Sharpe Ratio", "Tracking Error"])
     else:
         # Short period: show period metrics and annualized tracking error
         comparison_df = pd.DataFrame({
