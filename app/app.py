@@ -1,537 +1,241 @@
+"""
+Portfolio Optimizer - Main Application
+
+A professional portfolio optimization tool built with Streamlit that allows users
+to input a list of tickers and calculates optimal weights based on the Sharpe ratio.
+
+This module serves as the orchestrator for the application, coordinating between
+data fetching, calculations, and UI display.
+"""
+
 import sys
-import pandas as pd   # pyright: ignore[reportMissingModuleSource]
-from pathlib import Path
 import datetime
-import streamlit as st # type: ignore
-import plotly.express as px # type: ignore
-from io import BytesIO
-import openpyxl  # pyright: ignore[reportMissingImports]
-from openpyxl.utils import get_column_letter  # pyright: ignore[reportMissingImports]
+from pathlib import Path
+from typing import List, Tuple
+
+import streamlit as st  # type: ignore
+import pandas as pd  # pyright: ignore[reportMissingModuleSource]
 
 # Ensure the backend package is discoverable
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# Import from backend directly
-from backend import (optimize_portfolio, calculate_series_metrics, calculate_end_pf_weights, get_data, get_bmk, get_fx, calculate_tracking_error, calculate_period_metrics) # type: ignore
-from utils import load_index_metadata
+# Import from backend
+from backend import optimize_portfolio, get_data, get_bmk  # type: ignore
 
-# Initialize session state keys if they don't exist
+# Import from local modules
+from . import config
+from .metrics import prepare_portfolio_data, build_comparison_dataframe, build_holdings_dataframe
+from .display import display_sidebar_inputs, display_optimization_section
+from .export import generate_csv_holdings, generate_excel_full_page
+
+
+# ============================================================================
+# PAGE CONFIGURATION & SESSION STATE
+# ============================================================================
+
+st.set_page_config(page_title=config.PAGE_TITLE, layout=config.PAGE_LAYOUT)
+st.title("🎯 Portfolio Optimizer")
+
+# Initialize session state
 if 'optimized_data' not in st.session_state:
     st.session_state.optimized_data = None
 
-st.set_page_config(page_title="Portfolio Optimizer", layout="wide")
-st.title("🎯 Portfolio Optimizer")
-st.sidebar.header("User Inputs")
 
-# Data caching
+# ============================================================================
+# DATA CACHING
+# ============================================================================
+
 @st.cache_data
-def cached_get_data(ticker_list, start_date, end_date):
+def cached_get_data(ticker_list: List[str], start_date: datetime.date, end_date: datetime.date) -> pd.DataFrame:
+    """Cached data retrieval from yfinance."""
     return get_data(ticker_list, start_date, end_date)
 
 
-# Export utility functions
-def generate_csv_holdings(holdings_display):
-    """Generate CSV for holdings table"""
-    return holdings_display.to_csv(index=False)
+# ============================================================================
+# OPTIMIZATION WORKFLOW
+# ============================================================================
 
-
-def generate_excel_full_page(comparison_df, holdings_display, period_days, fig_pie, fig_chart):
+def run_optimization(
+    ticker_list: List[str],
+    start_date: datetime.date,
+    end_date: datetime.date,
+    benchmark_name: str,
+    benchmark_ticker: str,
+    reporting_currency: str
+) -> bool:
     """
-    Generate Excel workbook with all tables and charts for Max Sharpe portfolio.
+    Execute the complete optimization workflow.
     
-    Layout:
-    - Row 1: Title
-    - Row 2: Period info
-    - Row 3+: Summary returns table
-    - Below: Holdings table
-    - Bottom: Pie chart (left, 10x10) and Cumulative chart (right, 10x30) side by side
+    Performs: data fetch → optimization → metric calculation → state storage
     
     Args:
-        comparison_df: Performance comparison DataFrame
-        holdings_display: Holdings table DataFrame
-        period_days: Number of days in the analysis period
-        fig_pie: Plotly pie chart figure
-        fig_chart: Plotly cumulative return chart figure
+        ticker_list: List of tickers to optimize
+        start_date: Analysis start date
+        end_date: Analysis end date
+        benchmark_name: Display name of benchmark
+        benchmark_ticker: Ticker symbol of benchmark
+        reporting_currency: Currency for reporting
     
     Returns:
-        BytesIO object containing Excel workbook
+        True if successful, False otherwise
     """
-    from openpyxl.drawing.image import Image as XLImage
-    from openpyxl.utils import get_column_letter
-    import copy
-    
-    buffer = BytesIO()
-    
-    # Create copies of figures to avoid modifying originals
-    fig_pie_export = copy.deepcopy(fig_pie)
-    fig_chart_export = copy.deepcopy(fig_chart)
-    
-    # Ensure background is white and colors are visible
-    fig_pie_export.update_layout(
-        plot_bgcolor='white',
-        paper_bgcolor='white',
-        font=dict(color='black')
-    )
-    
-    fig_chart_export.update_layout(
-        plot_bgcolor='white',
-        paper_bgcolor='white',
-        font=dict(color='black')
-    )
-    
-    # Convert Plotly figures to PNG images in memory with proper settings
-    pie_image_bytes = BytesIO(fig_pie_export.to_image(format="png", width=400, height=400, scale=2))
-    pie_image_bytes.seek(0)
-    
-    chart_image_bytes = BytesIO(fig_chart_export.to_image(format="png", width=1000, height=500, scale=2))
-    chart_image_bytes.seek(0)
-    
-    # Create Excel workbook
-    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-        # Sheet 1: MaxSharpe (Main sheet with all portfolio output)
-        comparison_df.to_excel(writer, sheet_name='MaxSharpe', startrow=2, index=True)
-        ws_main = writer.sheets['MaxSharpe']
+    try:
+        # Calculate period length
+        period_days = (end_date - start_date).days
         
-        # Add title and period info
-        ws_main['A1'] = 'Maximum Sharpe Portfolio Analysis'
-        ws_main['A2'] = f'Analysis Period: {period_days} days'
+        # 1. Fetch price data
+        df_prices = cached_get_data(ticker_list, start_date, end_date)
+        if df_prices.empty:
+            st.error("Could not retrieve price data for the specified tickers.")
+            return False
         
-        # Adjust column widths for summary table
-        for col_idx, col in enumerate(comparison_df.columns, 1):
-            max_length = len(str(col))
-            col_letter = get_column_letter(col_idx + 1)  # +1 for index column
-            for val in comparison_df[col]:
-                max_length = max(max_length, len(str(val)))
-            ws_main.column_dimensions[col_letter].width = min(max_length + 2, 50)
+        # 2. Portfolio optimization
+        weights, port_perf = optimize_portfolio(df_prices)
         
-        # Calculate position for holdings table (below summary table)
-        summary_last_row = 3 + len(comparison_df)  # Row 3 is header, then data rows
-        holdings_header_row = summary_last_row + 2
-        holdings_data_start_row = holdings_header_row + 1
+        # 3. Fetch benchmark data
+        bmk_df, bmk_meta = get_bmk(
+            benchmark_ticker,
+            start_date.isoformat(),
+            end_date.isoformat(),
+            reporting_currency
+        )
         
-        # Add holdings header
-        ws_main[f'A{holdings_header_row}'] = 'Holdings'
+        if bmk_df.empty:
+            st.error("Could not retrieve benchmark data.")
+            return False
         
-        # Write holdings table to the sheet
-        for col_idx, col_name in enumerate(holdings_display.columns, 1):
-            ws_main.cell(row=holdings_data_start_row, column=col_idx, value=col_name)
+        bmk_series = bmk_df["benchmark_adj_close_converted"]
         
-        for row_idx, row_data in enumerate(holdings_display.values, holdings_data_start_row + 1):
-            for col_idx, value in enumerate(row_data, 1):
-                ws_main.cell(row=row_idx, column=col_idx, value=value)
+        # 4. Prepare all portfolio data (single-pass calculation)
+        portfolio_data = prepare_portfolio_data(
+            ticker_list,
+            df_prices,
+            weights,
+            bmk_series,
+            period_days
+        )
         
-        # Adjust column widths for holdings table
-        for col_idx, col in enumerate(holdings_display.columns, 1):
-            max_length = len(str(col))
-            col_letter = get_column_letter(col_idx)
-            for val in holdings_display[col]:
-                max_length = max(max_length, len(str(val)))
-            ws_main.column_dimensions[col_letter].width = min(max_length + 2, 50)
+        # 5. Build display dataframes
+        comparison_df = build_comparison_dataframe(
+            port_perf=port_perf,
+            bmk_perf=portfolio_data["bmk_perf"],
+            port_period_metrics=portfolio_data["port_period_metrics"],
+            bmk_period_metrics=portfolio_data["bmk_period_metrics"],
+            tracking_error=portfolio_data["tracking_error"],
+            period_days=period_days
+        )
         
-        # Calculate position for charts (below holdings table)
-        holdings_last_row = holdings_data_start_row + len(holdings_display)
-        charts_header_row = holdings_last_row + 2
-        charts_data_row = charts_header_row + 1
+        holdings_df = build_holdings_dataframe(df_prices, weights, format_percentages=False)
         
-        # Add charts header
-        ws_main[f'A{charts_header_row}'] = 'Portfolio Allocation & Performance'
+        # 6. Store in session state for display
+        st.session_state.optimized_data = {
+            "weights": weights,
+            "prices": df_prices,
+            "holdings_df": holdings_df,
+            "comparison_df": comparison_df,
+            "chart_data": portfolio_data["chart_data"],
+            "benchmark_name": benchmark_name,
+            "period_days": period_days,
+            "port_perf": port_perf,
+            "bmk_perf": portfolio_data["bmk_perf"],
+            "port_period_metrics": portfolio_data["port_period_metrics"],
+            "bmk_period_metrics": portfolio_data["bmk_period_metrics"],
+            "tracking_error": portfolio_data["tracking_error"],
+        }
         
-        # Add pie chart on the left (column A)
-        # Dimensions: 10x10 (in EMUs: 1cm ≈ 360000 EMUs, so 10cm ≈ 3,600,000 EMUs)
-        pie_img = XLImage(pie_image_bytes)
-        pie_img.width = int(400)   # 10 cm width
-        pie_img.height = int(400)  # 10 cm height
-        ws_main.add_image(pie_img, f'A{charts_data_row}')
+        return True
         
-        # Add cumulative chart on the right (column E, giving space for pie chart)
-        # Dimensions: 30x10 (30cm wide, 10cm tall)
-        chart_img = XLImage(chart_image_bytes)
-        chart_img.width = int(1200)   # 30 cm width
-        chart_img.height = int(400)  # 10 cm height
-        ws_main.add_image(chart_img, f'E{charts_data_row}')
-        
-        # Sheet 2: Holdings (reference sheet)
-        holdings_display.to_excel(writer, sheet_name='Holdings', index=False)
-        ws_holdings = writer.sheets['Holdings']
-        
-        # Adjust column widths for holdings sheet
-        for col_idx, col in enumerate(holdings_display.columns, 1):
-            max_length = len(str(col))
-            col_letter = get_column_letter(col_idx)
-            for val in holdings_display[col]:
-                max_length = max(max_length, len(str(val)))
-            ws_holdings.column_dimensions[col_letter].width = min(max_length + 2, 50)
-    
-    buffer.seek(0)
-    return buffer
+    except Exception as e:
+        st.error(f"❌ Error during optimization: {str(e)}")
+        return False
 
-# User Inputs
-# US Equity tickers -> AAPL,MA,META,V,AMZN,BA,BAC,BK,C,GS,JPM,MS,STT,WFC,LLY,BSX,JNJ,XOM,MDT,MSFT,GOOGL,NVDA,AVGO,CRM,UNH
-tickers = st.sidebar.text_input("Enter Tickers (comma separated)", value="AAPL,MA,META,V,AMZN,BA,BAC,BK,C,GS,JPM,MS,STT,WFC,LLY,BSX,JNJ,XOM,MDT,MSFT,GOOGL,NVDA,AVGO,CRM,UNH")
 
-st.sidebar.subheader("Benchmark")
-BENCHMARKS = {"S&P 500": "SPY", "MSCI ACWI": "ACWI"}
-benchmark_name = st.sidebar.selectbox("Benchmark", options=list(BENCHMARKS.keys()))
-benchmark_ticker = BENCHMARKS[benchmark_name]
+# ============================================================================
+# SIDEBAR INPUT SECTION
+# ============================================================================
 
-st.sidebar.subheader("Reporting currency")
-reporting_currency = st.sidebar.selectbox("Reporting currency", options=["USD", "GBP", "EUR"], index=0)
+tickers, benchmark_name, benchmark_ticker, reporting_currency = display_sidebar_inputs()
 
-# Dates inputs with validation
+# Date inputs
 today = datetime.date.today()
 one_year_ago = today - datetime.timedelta(days=365)
 start_date = st.sidebar.date_input("Start Date", value=one_year_ago, max_value=today)
-end_date = st.sidebar.date_input("End Date", value=today - datetime.timedelta(days=1), min_value=start_date, max_value=today - datetime.timedelta(days=1))
+end_date = st.sidebar.date_input(
+    "End Date",
+    value=today - datetime.timedelta(days=1),
+    min_value=start_date,
+    max_value=today - datetime.timedelta(days=1)
+)
 
+# Optimize button
 if st.sidebar.button("Optimize"):
     ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+    
     if not ticker_list:
         st.error("Please enter at least one valid ticker.")
+    elif len(ticker_list) > config.MAX_TICKERS:
+        st.error(f"Please enter no more than {config.MAX_TICKERS} tickers.")
     else:
-        try:
-            # Calculate period length in days
-            period_days = (end_date - start_date).days
-            
-            # 1. Portfolio Optimization
-            df_prices = cached_get_data(ticker_list, start_date, end_date)
-            weights, port_perf = optimize_portfolio(df_prices)
-            
-            # 2. Portfolio Cumulative Returns
-            port_returns = df_prices.pct_change().dropna()
-            port_daily_rets = (port_returns * pd.Series(weights)).sum(axis=1)
-            port_cum_rets = (1 + port_daily_rets).cumprod() - 1
-            
-            # 3. Benchmark Processing
-            bmk_df, bmk_meta = get_bmk(benchmark_ticker, start_date.isoformat(), end_date.isoformat(), reporting_currency)
-            
-            if not bmk_df.empty:  
-                bmk_series = bmk_df["benchmark_adj_close_converted"]
-                bmk_daily_rets = bmk_series.pct_change().dropna()
-                
-                # Calculate metrics with conditional annualization
-                annualize = period_days >= 365
-                bmk_perf = calculate_series_metrics(bmk_series, annualize=annualize)
-                
-                # Calculate tracking error (always annualized)
-                tracking_error = calculate_tracking_error(port_daily_rets, bmk_daily_rets)
-                
-                # Calculate cumulative returns
-                port_cum_ret_final = (1 + port_daily_rets).prod() - 1
-                bmk_cum_ret_final = (1 + bmk_daily_rets).prod() - 1
-                
-                # Calculate period metrics (for short periods) and store annualized metrics
-                port_period_metrics = calculate_period_metrics(port_daily_rets, port_cum_ret_final, len(port_daily_rets))
-                bmk_period_metrics = calculate_period_metrics(bmk_daily_rets, bmk_cum_ret_final, len(bmk_daily_rets))
-                
-                # FIXED: Created missing bmk_cum_rets and chart_df
-                bmk_cum_rets = (bmk_series / bmk_series.iloc[0]) - 1
-                chart_df = pd.DataFrame({
-                    "Max Sharpe PF": port_cum_rets,
-                    "Benchmark": bmk_cum_rets
-                }).fillna(0)
-
-                # 4. Save to Session State
-                st.session_state.optimized_data = {
-                    "weights": weights,
-                    "port_perf": port_perf,  # annualized metrics from optimizer
-                    "bmk_perf": bmk_perf,  # conditional annualization
-                    "port_period_metrics": port_period_metrics,  # period metrics for short periods
-                    "bmk_period_metrics": bmk_period_metrics,  # period metrics for short periods
-                    "chart_data": chart_df, 
-                    "benchmark_name": benchmark_name,
-                    "prices": df_prices,
-                    "ticker_list": ticker_list,
-                    "period_days": period_days,
-                    "tracking_error": tracking_error,
-                }
-            else:
-                st.error("Could not retrieve benchmark data.")
-        except Exception as e:
-            st.error(f"⚠️ {str(e)}")
+        run_optimization(
+            ticker_list,
+            start_date,
+            end_date,
+            benchmark_name,
+            benchmark_ticker,
+            reporting_currency
+        )
 
 
-
-
-
-
+# ============================================================================
 # DISPLAY SECTION
+# ============================================================================
+
 if st.session_state.optimized_data:
     data = st.session_state.optimized_data
     
-    # 1. Weights Pie Chart (Left-aligned and narrower)
-    st.subheader("Maximum Sharpe Portfolio Weights")
-    col_pie, col_spacer = st.columns([1.2, 2])
-    with col_pie:
-        # Filter weights to only show stocks with weight > 0%
-        weights_filtered = {ticker: weight for ticker, weight in data["weights"].items() if weight > 0}
+    # Display all optimization results
+    result = display_optimization_section(data)
+    
+    if result:
+        fig_pie, fig_chart, holdings_display = result
         
-        if weights_filtered:
-            # Create pie chart with explicit color palette
-            fig_pie = px.pie(
-                names=list(weights_filtered.keys()), 
-                values=list(weights_filtered.values()),
-                color_discrete_sequence=px.colors.qualitative.Plotly
-            )
-            fig_pie.update_layout(
-                width=400, 
-                height=400, 
-                showlegend=True,
-                plot_bgcolor='white',
-                paper_bgcolor='white'
-            )
-            st.plotly_chart(fig_pie, width="content")
-        else:
-            st.warning("No stocks with positive weights in portfolio.")
-
-    # Holdings table: ticker, name, GICS Sector, weight start, weight end
-    st.subheader("Holdings: Ticker, Name, GICS Sector, Weights")
-
-    try:
-        # Retrieve stored objects
-        prices_df = st.session_state.optimized_data.get("prices")
-        weights = st.session_state.optimized_data.get("weights")
-
-        if prices_df is None or not weights:
-            st.info("Price data or optimized weights not available to build holdings table.")
-        else:
-            # Compute start and end weights using the helper
-            w_start, w_end = calculate_end_pf_weights(prices_df, weights)
-
-            if w_start.empty:
-                st.warning("No overlapping tickers between optimizer weights and price data.")
-            else:
-                # Build DataFrame
-                holdings = pd.DataFrame({
-                    "Weight Start": w_start,
-                    "Weight End": w_end
-                }).fillna(0)
-
-                # Load metadata and join
-                meta = load_index_metadata(sheet_name="SPX")
-                if not meta.empty:
-                    # Join on ticker index
-                    holdings = holdings.join(meta, how="left")
-
-                # Sort by Weight Start (descending) on the original holdings before formatting
-                holdings = holdings.sort_values("Weight Start", ascending=False)
-                
-                # Format percentages
-                holdings_display = holdings.copy()
-                holdings_display["Weight Start"] = holdings_display["Weight Start"].map("{:.2%}".format)
-                holdings_display["Weight End"] = holdings_display["Weight End"].map("{:.2%}".format)
-
-                # Reorder columns: Ticker, Security, GICS Sector, Weight Start, Weight End
-                cols = ["Weight Start", "Weight End"]
-                if "Security" in holdings_display.columns:
-                    cols = ["Security"] + cols
-                if "GICS Sector" in holdings_display.columns:
-                    cols = ["GICS Sector"] + cols
-
-                # Reset index to show ticker as a column
-                holdings_display = holdings_display.reset_index().rename(columns={"index": "Ticker"})
-                
-                # Display with narrower columns
-                st.dataframe(
-                    holdings_display[["Ticker"] + cols],
-                    column_config={
-                        "Ticker": st.column_config.TextColumn(width="small"),
-                        "Security": st.column_config.TextColumn(width="medium"),
-                        "GICS Sector": st.column_config.TextColumn(width="medium"),
-                        "Weight Start": st.column_config.TextColumn(width="small"),
-                        "Weight End": st.column_config.TextColumn(width="small"),
-                    },
-                    width="content",
-                    hide_index=True
+        # Export section
+        st.divider()
+        st.subheader("📊 Export Results")
+        
+        try:
+            col1, col2 = st.columns(2)
+            
+            # CSV export for holdings
+            if holdings_display is not None:
+                csv_data = generate_csv_holdings(holdings_display)
+                with col1:
+                    st.download_button(
+                        label="📥 Download Holdings as CSV",
+                        data=csv_data,
+                        file_name="portfolio_holdings.csv",
+                        mime="text/csv",
+                        key="holdings_csv"
+                    )
+            
+            # Excel export with charts
+            if fig_pie is not None and fig_chart is not None:
+                excel_buffer = generate_excel_full_page(
+                    data["comparison_df"],
+                    holdings_display,
+                    data["period_days"],
+                    fig_pie,
+                    fig_chart
                 )
                 
-                # CSV Export button for holdings
-                csv_data = generate_csv_holdings(holdings_display[["Ticker"] + cols])
-                st.download_button(
-                    label="📥 Download Holdings as CSV",
-                    data=csv_data,
-                    file_name="portfolio_holdings.csv",
-                    mime="text/csv",
-                    key="holdings_csv"
-                )
-    except Exception as e:
-        st.error(f"Failed to build holdings table: {e}")
-
-
-# 2. Performance Comparison Table
-    st.subheader("Max Sharpe Portfolio vs Benchmark")
-
-    # Determine if metrics are annualized
-    period_days = data.get("period_days", 365)
-    annualize = period_days >= 365
-
-    if annualize:
-        # Long period: show annualized metrics
-        comparison_df = pd.DataFrame({
-            "Portfolio": [
-                f"{data['port_period_metrics'][0]:.1%}",  # Cumulative Return
-                f"{data['port_perf'][0]:.1%}",  # Annualized Return
-                f"{data['port_perf'][1]:.1%}",  # Annualized Volatility
-                f"{data['port_perf'][2]:.2f}",  # Sharpe Ratio
-                f"{data['tracking_error']:.1%}"  # Annualized Tracking Error
-            ],
-            "Benchmark": [
-                f"{data['bmk_period_metrics'][0]:.1%}",  # Cumulative Return
-                f"{data['bmk_perf'][0]:.1%}",  # Annualized Return
-                f"{data['bmk_perf'][1]:.1%}",  # Annualized Volatility
-                f"{data['bmk_perf'][2]:.2f}",  # Sharpe Ratio
-                "-"  # No tracking error for benchmark
-            ]
-        }, index=["Cumulative Return", "Annualised Return", "Annualised Volatility", "Sharpe Ratio", "Tracking Error"])
-    else:
-        # Short period: show period metrics and annualized tracking error
-        comparison_df = pd.DataFrame({
-            "Portfolio": [
-                f"{data['port_period_metrics'][0]:.1%}",  # Cumulative Return
-                f"{data['port_period_metrics'][1]:.1%}",  # Period Volatility
-                f"{data['port_period_metrics'][2]:.2f}",  # Period Sharpe
-                f"{data['tracking_error']:.1%}"  # Annualized Tracking Error
-            ],
-            "Benchmark": [
-                f"{data['bmk_period_metrics'][0]:.1%}",  # Cumulative Return
-                f"{data['bmk_period_metrics'][1]:.1%}",  # Period Volatility
-                f"{data['bmk_period_metrics'][2]:.2f}",  # Period Sharpe
-                "-"  # No tracking error for benchmark
-            ]
-        }, index=["Cumulative Return", "Period Volatility", "Period Sharpe", "Tracking Error"])
-
-    # Display with narrower columns using column_config
-    st.dataframe(
-        comparison_df,
-        column_config={
-            "Portfolio": st.column_config.TextColumn(width="small"),
-            "Benchmark": st.column_config.TextColumn(width="small"),
-        },
-        width="content",
-        hide_index=False
-    )
-    # 3. Normalized Cumulative Returns Chart
-    st.divider()
-    st.subheader(f"Cumulative Return: Max Sharpe Portfolio vs {data['benchmark_name']} (%)")
-    
-    fig = px.line(data["chart_data"] * 100,
-              x=data["chart_data"].index,
-              y=data["chart_data"].columns,
-              labels={"value": "Cumulative Return (%)", "index": "Date"},
-              #title=f"Cumulative Return: Portfolio vs {data['benchmark_name']} (%)",
-              template="plotly_white")
-
-    # Improve x-axis: show month abbrev and year on two lines, rotate for readability
-    fig.update_xaxes(
-        tickformat="%b\n%Y",   # e.g., "Feb\n2026"
-        tickangle=0,
-        tickmode="auto",
-        nticks=12,             # target number of ticks (adjust as needed)
-        showgrid=False
-    )
-
-    # Set hover template to show 2 decimals
-    fig.update_traces(
-        hovertemplate="<b>%{fullData.name}</b><br>Date: %{x|%Y-%m-%d}<br>Return: %{y:.2f}%<extra></extra>"
-    )
-
-    # Set explicit figure size (width used only when width="content")
-    fig.update_layout(
-        width=1400, 
-        height=600, 
-        margin=dict(l=40, r=20, t=60, b=40),
-        legend=dict(x=0, y=1, xanchor="left", yanchor="top")
-    )
-
-    # Render in Streamlit: use width="stretch" to fill the column, or width="content" to use fig.width
-    st.plotly_chart(fig, width="content")   # fills the container; height controlled by fig.update_layout(height=...)
-
-    # Export Full Page to Excel
-    st.divider()
-    st.subheader("📊 Export Results")
-    
-    # Build export data structures from session data
-    try:
-        # Rebuild comparison dataframe for export
-        period_days = data.get("period_days", 365)
-        annualize = period_days >= 365
-
-        if annualize:
-            comparison_export = pd.DataFrame({
-                "Portfolio": [
-                    f"{data['port_period_metrics'][0]:.1%}",
-                    f"{data['port_perf'][0]:.1%}",
-                    f"{data['port_perf'][1]:.1%}",
-                    f"{data['port_perf'][2]:.2f}",
-                    f"{data['tracking_error']:.1%}"
-                ],
-                "Benchmark": [
-                    f"{data['bmk_period_metrics'][0]:.1%}",
-                    f"{data['bmk_perf'][0]:.1%}",
-                    f"{data['bmk_perf'][1]:.1%}",
-                    f"{data['bmk_perf'][2]:.2f}",
-                    "-"
-                ]
-            }, index=["Cumulative Return", "Annualised Return", "Annualised Volatility", "Sharpe Ratio", "Tracking Error"])
-        else:
-            comparison_export = pd.DataFrame({
-                "Portfolio": [
-                    f"{data['port_period_metrics'][0]:.1%}",
-                    f"{data['port_period_metrics'][1]:.1%}",
-                    f"{data['port_period_metrics'][2]:.2f}",
-                    f"{data['tracking_error']:.1%}"
-                ],
-                "Benchmark": [
-                    f"{data['bmk_period_metrics'][0]:.1%}",
-                    f"{data['bmk_period_metrics'][1]:.1%}",
-                    f"{data['bmk_period_metrics'][2]:.2f}",
-                    "-"
-                ]
-            }, index=["Cumulative Return", "Period Volatility", "Period Sharpe", "Tracking Error"])
+                with col2:
+                    st.download_button(
+                        label="📊 Download Full Report as Excel",
+                        data=excel_buffer,
+                        file_name="portfolio_report.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="full_export_excel"
+                    )
         
-        # Rebuild holdings table for export
-        prices_df = data.get("prices")
-        weights = data.get("weights")
-        
-        if prices_df is not None and weights:
-            w_start, w_end = calculate_end_pf_weights(prices_df, weights)
-            
-            holdings_export = pd.DataFrame({
-                "Weight Start": w_start,
-                "Weight End": w_end
-            }).fillna(0)
-            
-            meta = load_index_metadata(sheet_name="SPX")
-            if not meta.empty:
-                holdings_export = holdings_export.join(meta, how="left")
-            
-            holdings_export = holdings_export.sort_values("Weight Start", ascending=False)
-            holdings_export_display = holdings_export.copy()
-            holdings_export_display["Weight Start"] = holdings_export_display["Weight Start"].map("{:.2%}".format)
-            holdings_export_display["Weight End"] = holdings_export_display["Weight End"].map("{:.2%}".format)
-            
-            cols = ["Weight Start", "Weight End"]
-            if "Security" in holdings_export_display.columns:
-                cols = ["Security"] + cols
-            if "GICS Sector" in holdings_export_display.columns:
-                cols = ["GICS Sector"] + cols
-            
-            holdings_export_display = holdings_export_display.reset_index().rename(columns={"index": "Ticker"})
-            holdings_export_final = holdings_export_display[["Ticker"] + cols]
-            
-            # Generate Excel file with chart figures
-            # Note: fig_pie and fig are already created earlier in the display section
-            excel_buffer = generate_excel_full_page(comparison_export, holdings_export_final, period_days, fig_pie, fig)
-            
-            # Excel export button
-            st.download_button(
-                label="📊 Download Full Report as Excel",
-                data=excel_buffer,
-                file_name="portfolio_report.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="full_export_excel"
-            )
-    except Exception as e:
-        st.warning(f"Export functionality: {str(e)}")
-
-
-
+        except Exception as e:
+            st.warning(f"Export functionality: {str(e)}")
