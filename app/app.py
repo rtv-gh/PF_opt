@@ -219,13 +219,13 @@ if st.session_state.optimized_data:
                     )
             
             # Excel export with charts
-            if fig_pie is not None and fig_chart is not None:
+            if holdings_display is not None:
                 excel_buffer = generate_excel_full_page(
                     data["comparison_df"],
                     holdings_display,
                     data["period_days"],
-                    fig_pie,
-                    fig_chart
+                    data["chart_data"],
+                    data["weights"]
                 )
                 
                 with col2:
