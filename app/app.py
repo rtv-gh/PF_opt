@@ -22,11 +22,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 # Import from backend
 from backend import optimize_portfolio, get_data, get_bmk  # type: ignore
 
-# Import from local modules
-from . import config
-from .metrics import prepare_portfolio_data, build_comparison_dataframe, build_holdings_dataframe
-from .display import display_sidebar_inputs, display_optimization_section
-from .export import generate_csv_holdings, generate_excel_full_page
+# Import from app modules (absolute imports for Streamlit compatibility)
+from app import config  # type: ignore
+from app.metrics import prepare_portfolio_data, build_comparison_dataframe, build_holdings_dataframe  # type: ignore
+from app.display import display_sidebar_inputs, display_optimization_section  # type: ignore
+from app.export import generate_csv_holdings, generate_excel_full_page  # type: ignore
 
 
 # ============================================================================

@@ -8,9 +8,9 @@ keeping it separate from business logic and calculations.
 from typing import Dict, Optional, Tuple, List
 import pandas as pd
 import streamlit as st
-import plotly.express as px
+import plotly.express as px  # type: ignore
 
-from .config import (
+from app.config import (  # type: ignore
     PIE_CHART_WIDTH, PIE_CHART_HEIGHT,
     LINE_CHART_WIDTH, LINE_CHART_HEIGHT,
     COLUMN_WIDTH_SMALL, COLUMN_WIDTH_MEDIUM,

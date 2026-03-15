@@ -10,10 +10,10 @@ from io import BytesIO
 import pandas as pd
 import copy
 
-from openpyxl.drawing.image import Image as XLImage
-from openpyxl.utils import get_column_letter
+from openpyxl.drawing.image import Image as XLImage  # type: ignore
+from openpyxl.utils import get_column_letter  # type: ignore
 
-from .config import EXCEL_SCALE, EXCEL_MAX_COLUMN_WIDTH, PIE_CHART_EMU_WIDTH, PIE_CHART_EMU_HEIGHT, CUMULATIVE_CHART_EMU_WIDTH, CUMULATIVE_CHART_EMU_HEIGHT
+from app.config import EXCEL_SCALE, EXCEL_MAX_COLUMN_WIDTH, EXCEL_PIE_CHART_WIDTH, EXCEL_PIE_CHART_HEIGHT, EXCEL_CUMULATIVE_CHART_WIDTH, EXCEL_CUMULATIVE_CHART_HEIGHT  # type: ignore
 
 
 def generate_csv_holdings(holdings_display: pd.DataFrame) -> str:
@@ -156,15 +156,17 @@ def generate_excel_full_page(
             ws_main[f'A{charts_header_row}'] = 'Portfolio Allocation & Performance'
             
             # Add pie chart on the left (column A)
+            # Dimensions: 400x400 pixels
             pie_img = XLImage(pie_image_bytes)
-            pie_img.width = PIE_CHART_EMU_WIDTH
-            pie_img.height = PIE_CHART_EMU_HEIGHT
+            pie_img.width = EXCEL_PIE_CHART_WIDTH
+            pie_img.height = EXCEL_PIE_CHART_HEIGHT
             ws_main.add_image(pie_img, f'A{charts_data_row}')
             
             # Add cumulative chart on the right (column E, giving space for pie chart)
+            # Dimensions: 400x1200 pixels
             chart_img = XLImage(chart_image_bytes)
-            chart_img.width = CUMULATIVE_CHART_EMU_WIDTH
-            chart_img.height = CUMULATIVE_CHART_EMU_HEIGHT
+            chart_img.width = EXCEL_CUMULATIVE_CHART_WIDTH
+            chart_img.height = EXCEL_CUMULATIVE_CHART_HEIGHT
             ws_main.add_image(chart_img, f'E{charts_data_row}')
             
             # Sheet 2: Holdings (reference sheet)

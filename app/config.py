@@ -53,25 +53,26 @@ COLUMN_WIDTH_MEDIUM = "medium"
 # ============================================================================
 # CHART DIMENSIONS
 # ============================================================================
+# Display charts (Streamlit UI)
 PIE_CHART_WIDTH = 400
 PIE_CHART_HEIGHT = 400
-PIE_CHART_EMU_WIDTH = int(10 * 360000)  # 10cm in EMUs
-PIE_CHART_EMU_HEIGHT = int(10 * 360000)
 
 CUMULATIVE_CHART_WIDTH = 1000
 CUMULATIVE_CHART_HEIGHT = 500
-CUMULATIVE_CHART_EMU_WIDTH = int(30 * 360000)  # 30cm in EMUs
-CUMULATIVE_CHART_EMU_HEIGHT = int(10 * 360000)
 
 LINE_CHART_WIDTH = 1400
 LINE_CHART_HEIGHT = 600
+
+# Excel export charts (pixel dimensions)
+EXCEL_PIE_CHART_WIDTH = 400
+EXCEL_PIE_CHART_HEIGHT = 400
+EXCEL_CUMULATIVE_CHART_WIDTH = 1200
+EXCEL_CUMULATIVE_CHART_HEIGHT = 400
 
 # ============================================================================
 # EXCEL EXPORT SETTINGS
 # ============================================================================
 EXCEL_SCALE = 2  # DPI scale for images (2x = high quality)
-EXCEL_PIE_WIDTH = 400
-EXCEL_PIE_HEIGHT = 400
 EXCEL_MAX_COLUMN_WIDTH = 50
 
 # ============================================================================

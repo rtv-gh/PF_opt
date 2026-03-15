@@ -17,7 +17,7 @@ from backend import (
     calculate_period_metrics
 )
 from utils import load_index_metadata
-from .config import METRICS_ANNUALIZED, METRICS_PERIOD, ANNUALIZATION_THRESHOLD_DAYS, PERCENTAGE_FORMAT, DECIMAL_FORMAT
+from app.config import METRICS_ANNUALIZED, METRICS_PERIOD, ANNUALIZATION_THRESHOLD_DAYS, PERCENTAGE_FORMAT, DECIMAL_FORMAT  # type: ignore
 
 
 def prepare_portfolio_data(
