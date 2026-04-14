@@ -15,16 +15,17 @@ from typing import List, Tuple
 
 import streamlit as st  # type: ignore
 import pandas as pd  # pyright: ignore[reportMissingModuleSource]
+import numpy as np  # pyright: ignore[reportMissingImports]
 
 # Ensure the backend package is discoverable
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import from backend
-from backend import optimize_portfolio, get_data, get_bmk  # type: ignore
+from backend import optimize_multiple_portfolios, get_data, get_bmk  # type: ignore
 
 # Import from app modules (absolute imports for Streamlit compatibility)
 from app import config  # type: ignore
-from app.metrics import prepare_portfolio_data, build_comparison_dataframe, build_holdings_dataframe  # type: ignore
+from app.metrics import prepare_multiple_portfolio_data, build_holdings_dataframe  # type: ignore
 from app.display import display_sidebar_inputs, display_optimization_section  # type: ignore
 from app.export import generate_csv_holdings, generate_excel_full_page  # type: ignore
 
@@ -61,12 +62,18 @@ def run_optimization(
     end_date: datetime.date,
     benchmark_name: str,
     benchmark_ticker: str,
-    reporting_currency: str
+    reporting_currency: str,
+    target_return: float = None,
+    target_risk: float = None,
+    target_te: float = None
 ) -> bool:
     """
     Execute the complete optimization workflow.
     
-    Performs: data fetch → optimization → metric calculation → state storage
+    Performs: data fetch → multi-portfolio optimization → metric calculation → state storage
+    
+    Supports multiple portfolio types (Max Sharpe, Min Variance, Efficient Return/Risk/TE) 
+    with a scalable architecture for future extensions.
     
     Args:
         ticker_list: List of tickers to optimize
@@ -75,6 +82,9 @@ def run_optimization(
         benchmark_name: Display name of benchmark
         benchmark_ticker: Ticker symbol of benchmark
         reporting_currency: Currency for reporting
+        target_return: Optional target return for efficient_return portfolio (e.g., 0.10 for 10%)
+        target_risk: Optional target volatility for efficient_risk portfolio (e.g., 0.15 for 15%)
+        target_te: Optional target tracking error for efficient_te portfolio (e.g., 0.05 for 5%)
     
     Returns:
         True if successful, False otherwise
@@ -89,10 +99,24 @@ def run_optimization(
             st.error("Could not retrieve price data for the specified tickers.")
             return False
         
-        # 2. Portfolio optimization
-        weights, port_perf = optimize_portfolio(df_prices)
+        # 2. Create benchmark weights (using 1/n equal weights)
+        benchmark_weights = np.ones(len(ticker_list)) / len(ticker_list)
         
-        # 3. Fetch benchmark data
+        # 3. Multi-portfolio optimization (Max Sharpe, Min Variance, Efficient Return/Risk/TE)
+        portfolios_raw = optimize_multiple_portfolios(
+            df_prices, 
+            target_return=target_return, 
+            target_risk=target_risk,
+            target_te=target_te,
+            benchmark_weights=benchmark_weights
+        )
+        
+        # Extract just the weights from (weights, perf) tuples
+        portfolios_dict = {
+            ptype: weights for ptype, (weights, perf) in portfolios_raw.items()
+        }
+        
+        # 4. Fetch benchmark data
         bmk_df, bmk_meta = get_bmk(
             benchmark_ticker,
             start_date.isoformat(),
@@ -106,42 +130,20 @@ def run_optimization(
         
         bmk_series = bmk_df["benchmark_adj_close_converted"]
         
-        # 4. Prepare all portfolio data (single-pass calculation)
-        portfolio_data = prepare_portfolio_data(
+        # 5. Prepare all portfolio data (multi-portfolio, single-pass calculation)
+        optimized_data = prepare_multiple_portfolio_data(
             ticker_list,
             df_prices,
-            weights,
+            portfolios_dict,
             bmk_series,
             period_days
         )
         
-        # 5. Build display dataframes
-        comparison_df = build_comparison_dataframe(
-            port_perf=port_perf,
-            bmk_perf=portfolio_data["bmk_perf"],
-            port_period_metrics=portfolio_data["port_period_metrics"],
-            bmk_period_metrics=portfolio_data["bmk_period_metrics"],
-            tracking_error=portfolio_data["tracking_error"],
-            period_days=period_days
-        )
+        # 6. Add benchmark name for display
+        optimized_data["benchmark_name"] = benchmark_name
         
-        holdings_df = build_holdings_dataframe(df_prices, weights, format_percentages=False)
-        
-        # 6. Store in session state for display
-        st.session_state.optimized_data = {
-            "weights": weights,
-            "prices": df_prices,
-            "holdings_df": holdings_df,
-            "comparison_df": comparison_df,
-            "chart_data": portfolio_data["chart_data"],
-            "benchmark_name": benchmark_name,
-            "period_days": period_days,
-            "port_perf": port_perf,
-            "bmk_perf": portfolio_data["bmk_perf"],
-            "port_period_metrics": portfolio_data["port_period_metrics"],
-            "bmk_period_metrics": portfolio_data["bmk_period_metrics"],
-            "tracking_error": portfolio_data["tracking_error"],
-        }
+        # 7. Store in session state for display
+        st.session_state.optimized_data = optimized_data
         
         return True
         
@@ -154,7 +156,7 @@ def run_optimization(
 # SIDEBAR INPUT SECTION
 # ============================================================================
 
-tickers, benchmark_name, benchmark_ticker, reporting_currency = display_sidebar_inputs()
+tickers, benchmark_name, benchmark_ticker, reporting_currency, target_return, target_risk, target_te = display_sidebar_inputs()
 
 # Date inputs
 today = datetime.date.today()
@@ -182,7 +184,10 @@ if st.sidebar.button("Optimize"):
             end_date,
             benchmark_name,
             benchmark_ticker,
-            reporting_currency
+            reporting_currency,
+            target_return=target_return,
+            target_risk=target_risk,
+            target_te=target_te
         )
 
 
@@ -197,45 +202,68 @@ if st.session_state.optimized_data:
     result = display_optimization_section(data)
     
     if result:
-        fig_pie, fig_chart, holdings_display = result
+        # Handle both old tuple format and new dict format
+        if isinstance(result, dict):
+            holdings_display = None
+            comparison_df = None
+            weights = None
+        else:
+            # Old tuple format: (fig_pie, fig_chart, holdings_display)
+            fig_pie, fig_chart, holdings_display = result
         
-        # Export section
-        st.divider()
-        st.subheader("📊 Export Results")
+        # Extract data for export (from either old or new format)
+        # For multi-portfolio, export the Max Sharpe portfolio (primary portfolio)
+        if "portfolios" in data and "max_sharpe" in data["portfolios"]:
+            # New multi-portfolio format
+            max_sharpe_data = data["portfolios"]["max_sharpe"]
+            comparison_df = max_sharpe_data.get("comparison_df")
+            holdings_display = max_sharpe_data.get("holdings_df")
+            weights = max_sharpe_data.get("weights")
+        elif "comparison_df" in data and "weights" in data:
+            # Old single-portfolio format
+            comparison_df = data.get("comparison_df")
+            holdings_display = data.get("holdings_df")
+            weights = data.get("weights")
         
-        try:
-            col1, col2 = st.columns(2)
+        # Only show export if we have the necessary data
+        if comparison_df is not None and weights is not None:
+            # Export section
+            st.divider()
+            st.subheader("📊 Export Results")
             
-            # CSV export for holdings
-            if holdings_display is not None:
-                csv_data = generate_csv_holdings(holdings_display)
-                with col1:
-                    st.download_button(
-                        label="📥 Download Holdings as CSV",
-                        data=csv_data,
-                        file_name="portfolio_holdings.csv",
-                        mime="text/csv",
-                        key="holdings_csv"
-                    )
-            
-            # Excel export with charts
-            if holdings_display is not None:
-                excel_buffer = generate_excel_full_page(
-                    data["comparison_df"],
-                    holdings_display,
-                    data["period_days"],
-                    data["chart_data"],
-                    data["weights"]
-                )
+            try:
+                col1, col2 = st.columns(2)
                 
-                with col2:
-                    st.download_button(
-                        label="📊 Download Full Report as Excel",
-                        data=excel_buffer,
-                        file_name="portfolio_report.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key="full_export_excel"
+                # CSV export for holdings
+                if holdings_display is not None:
+                    csv_data = generate_csv_holdings(holdings_display)
+                    with col1:
+                        st.download_button(
+                            label="📥 Download Holdings as CSV",
+                            data=csv_data,
+                            file_name="portfolio_holdings.csv",
+                            mime="text/csv",
+                            key="holdings_csv"
+                        )
+                
+                # Excel export with charts
+                if holdings_display is not None:
+                    excel_buffer = generate_excel_full_page(
+                        comparison_df,
+                        holdings_display,
+                        data["period_days"],
+                        data["chart_data"],
+                        weights
                     )
-        
-        except Exception as e:
-            st.warning(f"Export functionality: {str(e)}")
+                    
+                    with col2:
+                        st.download_button(
+                            label="📊 Download Full Report as Excel",
+                            data=excel_buffer,
+                            file_name="portfolio_report.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="full_export_excel"
+                        )
+            
+            except Exception as e:
+                st.warning(f"Export functionality: {str(e)}")

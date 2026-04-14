@@ -4,9 +4,12 @@ Metrics and data preparation module for Portfolio Optimizer.
 This module handles all portfolio metric calculations, data transformations,
 and preparation of data structures for display and export. It keeps UI logic
 separate from business logic.
+
+Supports multiple portfolio types (Max Sharpe, Min Variance, etc.) with a
+scalable architecture for future extensions.
 """
 
-from typing import Dict, Tuple, List, Optional
+from typing import Dict, Tuple, List, Optional, Any
 import pandas as pd
 import numpy as np
 
@@ -93,7 +96,148 @@ def prepare_portfolio_data(
     }
 
 
-def build_comparison_dataframe(
+def prepare_multiple_portfolio_data(
+    ticker_list: List[str],
+    prices: pd.DataFrame,
+    portfolios: Dict[str, Dict[str, float]],
+    bmk_series: pd.Series,
+    period_days: int
+) -> Dict[str, Any]:
+    """
+    Prepare data for multiple portfolio types in a single pass.
+    
+    This is the primary function for multi-portfolio analysis, computing all
+    metrics and data structures efficiently.
+    
+    Args:
+        ticker_list: List of tickers in each portfolio
+        prices: DataFrame of price history (shared across all portfolios)
+        portfolios: Dict mapping portfolio_type -> weights_dict
+                   e.g., {"max_sharpe": {...}, "min_variance": {...}}
+        bmk_series: Series of benchmark prices (shared across all portfolios)
+        period_days: Number of days in analysis period
+    
+    Returns:
+        Dict with structure:
+        {
+            "portfolios": {
+                "max_sharpe": {
+                    "weights": dict,
+                    "cum_rets": series,
+                    "daily_rets": series,
+                    "perf": tuple,
+                    "period_metrics": tuple,
+                    "tracking_error": float,
+                    "holdings_df": dataframe,
+                    "comparison_df": dataframe,
+                },
+                "min_variance": {...},
+                ...
+            },
+            "benchmark": {
+                "cum_rets": series,
+                "daily_rets": series,
+                "perf": tuple,
+                "period_metrics": tuple,
+            },
+            "prices": dataframe,
+            "period_days": int,
+            "annualize": bool,
+        }
+    """
+    annualize = period_days >= ANNUALIZATION_THRESHOLD_DAYS
+    
+    # Compute benchmark metrics once (shared across all portfolios)
+    bmk_daily_rets = bmk_series.pct_change().dropna()
+    bmk_cum_rets = (bmk_series / bmk_series.iloc[0]) - 1
+    bmk_cum_ret_final = bmk_cum_rets.iloc[-1] if len(bmk_cum_rets) > 0 else 0
+    bmk_perf = calculate_series_metrics(bmk_series, annualize=annualize)
+    bmk_period_metrics = calculate_period_metrics(bmk_daily_rets, bmk_cum_ret_final, len(bmk_daily_rets))
+    
+    # Compute data for each portfolio type
+    portfolios_data: Dict[str, Any] = {}
+    cumulative_returns_dict = {"Benchmark": bmk_cum_rets}
+    
+    for portfolio_type, weights in portfolios.items():
+        # Calculate portfolio returns
+        port_returns = prices.pct_change().dropna()
+        port_daily_rets = (port_returns * pd.Series(weights)).sum(axis=1)
+        port_cum_rets = (1 + port_daily_rets).cumprod() - 1
+        port_cum_ret_final = port_cum_rets.iloc[-1] if len(port_cum_rets) > 0 else 0
+        
+        # Calculate portfolio metrics
+        port_perf = calculate_series_metrics(prices.mean(axis=1), annualize=True)
+        tracking_error = calculate_tracking_error(port_daily_rets, bmk_daily_rets)
+        port_period_metrics = calculate_period_metrics(port_daily_rets, port_cum_ret_final, len(port_daily_rets))
+        
+        # Build comparison DataFrame
+        comparison_df = _build_portfolio_comparison_dataframe(
+            port_perf=port_perf,
+            bmk_perf=bmk_perf,
+            port_period_metrics=port_period_metrics,
+            bmk_period_metrics=bmk_period_metrics,
+            tracking_error=tracking_error,
+            period_days=period_days
+        )
+        
+        # Build holdings DataFrame
+        holdings_df = build_holdings_dataframe(prices, weights, format_percentages=False)
+        
+        # Store portfolio data
+        portfolios_data[portfolio_type] = {
+            "weights": weights,
+            "cum_rets": port_cum_rets,
+            "daily_rets": port_daily_rets,
+            "perf": port_perf,
+            "period_metrics": port_period_metrics,
+            "tracking_error": tracking_error,
+            "holdings_df": holdings_df,
+            "comparison_df": comparison_df,
+        }
+        
+        # Add to cumulative returns chart data
+        portfolio_label = _get_portfolio_display_name(portfolio_type)
+        cumulative_returns_dict[portfolio_label] = port_cum_rets
+    
+    # Build combined performance chart
+    chart_data = pd.DataFrame(cumulative_returns_dict).fillna(0)
+    
+    return {
+        "portfolios": portfolios_data,
+        "benchmark": {
+            "cum_rets": bmk_cum_rets,
+            "daily_rets": bmk_daily_rets,
+            "perf": bmk_perf,
+            "period_metrics": bmk_period_metrics,
+        },
+        "prices": prices,
+        "period_days": period_days,
+        "annualize": annualize,
+        "chart_data": chart_data,
+    }
+
+
+def _get_portfolio_display_name(portfolio_type: str) -> str:
+    """
+    Convert portfolio type key to display name.
+    
+    Args:
+        portfolio_type: Internal portfolio type (e.g., "max_sharpe", "min_variance", "efficient_return", "efficient_risk", "efficient_te")
+    
+    Returns:
+        Display name (e.g., "Max Sharpe", "Min Volatility", "Efficient Return", "Efficient Risk", "Efficient TE")
+    """
+    display_names = {
+        "max_sharpe": "Max Sharpe",
+        "min_variance": "Min Volatility",
+        "efficient_return": "Efficient Return",
+        "efficient_risk": "Efficient Risk",
+        "efficient_te": "Efficient TE",
+    }
+    return display_names.get(portfolio_type, portfolio_type.replace("_", " ").title())
+
+
+def _build_portfolio_comparison_dataframe(
     port_perf: Tuple[float, float, float],
     bmk_perf: Tuple[float, float, float],
     port_period_metrics: Tuple[float, float, float],
@@ -102,20 +246,9 @@ def build_comparison_dataframe(
     period_days: int
 ) -> pd.DataFrame:
     """
-    Build the metrics comparison DataFrame (used for both display and export).
+    Internal function to build comparison DataFrame for a single portfolio.
     
-    This eliminates duplication between UI display and Excel export.
-    
-    Args:
-        port_perf: Portfolio annualized metrics (return, vol, sharpe)
-        bmk_perf: Benchmark metrics (conditional annualization)
-        port_period_metrics: Portfolio period metrics (cum_ret, vol, sharpe)
-        bmk_period_metrics: Benchmark period metrics (cum_ret, vol, sharpe)
-        tracking_error: Annualized tracking error
-        period_days: Number of days in analysis period
-    
-    Returns:
-        DataFrame with Portfolio and Benchmark columns
+    This is used by both the single-portfolio and multi-portfolio preparation functions.
     """
     annualize = period_days >= ANNUALIZATION_THRESHOLD_DAYS
     
@@ -153,6 +286,37 @@ def build_comparison_dataframe(
         }, index=METRICS_PERIOD)
     
     return comparison_df
+
+
+def build_comparison_dataframe(
+    port_perf: Tuple[float, float, float],
+    bmk_perf: Tuple[float, float, float],
+    port_period_metrics: Tuple[float, float, float],
+    bmk_period_metrics: Tuple[float, float, float],
+    tracking_error: float,
+    period_days: int
+) -> pd.DataFrame:
+    """
+    Build the metrics comparison DataFrame (used for both display and export).
+    
+    Legacy function for backward compatibility. Use _build_portfolio_comparison_dataframe().
+    
+    This eliminates duplication between UI display and Excel export.
+    
+    Args:
+        port_perf: Portfolio annualized metrics (return, vol, sharpe)
+        bmk_perf: Benchmark metrics (conditional annualization)
+        port_period_metrics: Portfolio period metrics (cum_ret, vol, sharpe)
+        bmk_period_metrics: Benchmark period metrics (cum_ret, vol, sharpe)
+        tracking_error: Annualized tracking error
+        period_days: Number of days in analysis period
+    
+    Returns:
+        DataFrame with Portfolio and Benchmark columns
+    """
+    return _build_portfolio_comparison_dataframe(
+        port_perf, bmk_perf, port_period_metrics, bmk_period_metrics, tracking_error, period_days
+    )
 
 
 def build_holdings_dataframe(
