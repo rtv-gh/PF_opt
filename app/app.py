@@ -27,7 +27,7 @@ from backend import optimize_multiple_portfolios, get_data, get_bmk  # type: ign
 from app import config  # type: ignore
 from app.metrics import prepare_multiple_portfolio_data, build_holdings_dataframe  # type: ignore
 from app.display import display_sidebar_inputs, display_optimization_section  # type: ignore
-from app.export import generate_csv_holdings, generate_excel_full_page  # type: ignore
+from app.export import generate_excel_multiple_portfolios  # type: ignore
 
 
 # ============================================================================
@@ -232,38 +232,16 @@ if st.session_state.optimized_data:
             st.subheader("📊 Export Results")
             
             try:
-                col1, col2 = st.columns(2)
+                # Excel export with multiple worksheets (one per portfolio)
+                excel_buffer = generate_excel_multiple_portfolios(data)
                 
-                # CSV export for holdings
-                if holdings_display is not None:
-                    csv_data = generate_csv_holdings(holdings_display)
-                    with col1:
-                        st.download_button(
-                            label="📥 Download Holdings as CSV",
-                            data=csv_data,
-                            file_name="portfolio_holdings.csv",
-                            mime="text/csv",
-                            key="holdings_csv"
-                        )
-                
-                # Excel export with charts
-                if holdings_display is not None:
-                    excel_buffer = generate_excel_full_page(
-                        comparison_df,
-                        holdings_display,
-                        data["period_days"],
-                        data["chart_data"],
-                        weights
-                    )
-                    
-                    with col2:
-                        st.download_button(
-                            label="📊 Download Full Report as Excel",
-                            data=excel_buffer,
-                            file_name="portfolio_report.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key="full_export_excel"
-                        )
+                st.download_button(
+                    label="📊 Download Full Report as Excel",
+                    data=excel_buffer,
+                    file_name="portfolio_report.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="full_export_excel"
+                )
             
             except Exception as e:
                 st.warning(f"Export functionality: {str(e)}")
