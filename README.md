@@ -3,6 +3,8 @@
 An interactive financial tool built in Python to demonstrate **Modern Portfolio Theory (MPT)** and **Efficient Frontier** optimization using real-market data.
 
 ## 🚀 Live Demo
+streamlit run app/app.py
+
 https://rtv-gh-port.streamlit.app/  <<-- added 15/02/2026
 
 ## 🛠️ The Financial Logic

@@ -14,6 +14,7 @@ GITHUB_SPX_RAW = "https://raw.githubusercontent.com/datasets/s-and-p-500-compani
 
 EXCEL_PATH = Path(__file__).resolve().parent / "equity_tickers_lists.xlsx"
 SHEET_NAME_SPX = "SPX"
+GICS_STOCKS_CSV_PATH = Path(__file__).resolve().parent / "gics_sector_stocks.csv"
 
 
 # --- network helper with retries
@@ -71,6 +72,7 @@ def get_sp500_constituents(fetch_live: bool = True, use_cache_if_exists: bool = 
                 # Normalize Symbol column to string and strip whitespace
                 if "Symbol" in df.columns:
                     df["Symbol"] = df["Symbol"].astype(str).str.strip()
+                df.attrs["source_url"] = WIKI_SP500_URL
                 # Optionally write to local Excel for caching
                 try:
                     write_equity_lists_excel(str(EXCEL_PATH), {SHEET_NAME_SPX: df}, overwrite=True)
@@ -89,6 +91,7 @@ def get_sp500_constituents(fetch_live: bool = True, use_cache_if_exists: bool = 
         # Normalize columns if needed
         if "Symbol" in df.columns:
             df["Symbol"] = df["Symbol"].astype(str).str.strip()
+        df.attrs["source_url"] = GITHUB_SPX_RAW
         try:
             write_equity_lists_excel(str(EXCEL_PATH), {SHEET_NAME_SPX: df}, overwrite=True)
         except Exception:
@@ -103,12 +106,74 @@ def get_sp500_constituents(fetch_live: bool = True, use_cache_if_exists: bool = 
             df = pd.read_excel(EXCEL_PATH, sheet_name=SHEET_NAME_SPX)
             if "Symbol" in df.columns:
                 df["Symbol"] = df["Symbol"].astype(str).str.strip()
+            df.attrs["source_url"] = str(EXCEL_PATH)
             return df
         except Exception as e:
             logger.exception("Failed to read local Excel cache: %s", e)
 
     # Nothing worked
     raise FileNotFoundError("Unable to obtain S&P 500 constituents from network or local cache")
+
+
+def _normalize_gics_sector_stocks(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize constituent data to a stable schema for the app and CSV snapshot."""
+    data = df.copy()
+    if "Symbol" not in data.columns and "Ticker" in data.columns:
+        data = data.rename(columns={"Ticker": "Symbol"})
+    required = ["Symbol", "Security", "GICS Sector", "GICS Sub-Industry"]
+    for column in required:
+        if column not in data.columns:
+            data[column] = ""
+
+    for column in required:
+        data[column] = data[column].fillna("").astype(str).str.strip()
+    data["Symbol"] = data["Symbol"].str.upper()
+    data = data[(data["Symbol"] != "") & (data["GICS Sector"] != "")]
+    data = data.drop_duplicates(subset="Symbol", keep="last")
+
+    optional = [column for column in ["Source", "Retrieved At"] if column in data.columns]
+    return data[required + optional].sort_values(["GICS Sector", "Security", "Symbol"]).reset_index(drop=True)
+
+
+def load_gics_sector_stocks() -> pd.DataFrame:
+    """Load the saved GICS sector-to-stock dataset, falling back to the local workbook."""
+    try:
+        if GICS_STOCKS_CSV_PATH.exists():
+            data = pd.read_csv(GICS_STOCKS_CSV_PATH)
+        elif EXCEL_PATH.exists():
+            data = pd.read_excel(EXCEL_PATH, sheet_name=SHEET_NAME_SPX)
+        else:
+            data = get_sp500_constituents(fetch_live=True, use_cache_if_exists=False)
+        return _normalize_gics_sector_stocks(data)
+    except Exception as e:
+        logger.warning("Could not load GICS sector stocks: %s", e)
+        return pd.DataFrame(columns=["Symbol", "Security", "GICS Sector", "GICS Sub-Industry"])
+
+
+def save_gics_sector_stocks_csv(df: Optional[pd.DataFrame] = None) -> Path:
+    """Refresh and atomically save the S&P 500 GICS dataset as a structured CSV."""
+    source_data = df if df is not None else get_sp500_constituents(fetch_live=True)
+    data = _normalize_gics_sector_stocks(source_data)
+    if data.empty:
+        raise ValueError("No S&P 500 GICS sector data is available to save")
+
+    data["Source"] = source_data.attrs.get(
+        "source_url", f"{WIKI_SP500_URL} (GitHub mirror fallback: {GITHUB_SPX_RAW})"
+    )
+    data["Retrieved At"] = pd.Timestamp.now(tz="UTC").isoformat(timespec="seconds")
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", newline="", delete=False,
+        dir=GICS_STOCKS_CSV_PATH.parent, suffix=".csv"
+    ) as temp_file:
+        temp_path = Path(temp_file.name)
+        data.to_csv(temp_file, index=False)
+    try:
+        shutil.move(str(temp_path), str(GICS_STOCKS_CSV_PATH))
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+    logger.info("Wrote GICS sector stock data to %s", GICS_STOCKS_CSV_PATH)
+    return GICS_STOCKS_CSV_PATH
 
 # --- atomic Excel writer (reused from earlier)
 def write_equity_lists_excel(path: str, sheets: Dict[str, pd.DataFrame], overwrite: bool = True) -> None:

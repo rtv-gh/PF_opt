@@ -10,8 +10,9 @@ data fetching, calculations, and UI display.
 
 import sys
 import datetime
+from collections import Counter
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import streamlit as st  # type: ignore
 import pandas as pd  # pyright: ignore[reportMissingModuleSource]
@@ -65,7 +66,8 @@ def run_optimization(
     reporting_currency: str,
     target_return: float = None,
     target_risk: float = None,
-    target_te: float = None
+    target_te: float = None,
+    enforce_ucits_5_10_40: bool = False,
 ) -> bool:
     """
     Execute the complete optimization workflow.
@@ -98,6 +100,11 @@ def run_optimization(
         if df_prices.empty:
             st.error("Could not retrieve price data for the specified tickers.")
             return False
+        if enforce_ucits_5_10_40 and len(df_prices.columns) < 16:
+            st.error(
+                "At least 16 valid stocks are required to satisfy the UCITS 5/10/40 limits."
+            )
+            return False
         
         # 2. Create benchmark weights (using 1/n equal weights)
         benchmark_weights = np.ones(len(ticker_list)) / len(ticker_list)
@@ -108,7 +115,8 @@ def run_optimization(
             target_return=target_return, 
             target_risk=target_risk,
             target_te=target_te,
-            benchmark_weights=benchmark_weights
+            benchmark_weights=benchmark_weights,
+            ucits_5_10_40=enforce_ucits_5_10_40,
         )
         
         # Extract just the weights from (weights, perf) tuples
@@ -129,6 +137,7 @@ def run_optimization(
             return False
         
         bmk_series = bmk_df["benchmark_adj_close_converted"]
+        bmk_beta_series = bmk_df["benchmark_adj_close"]
         
         # 5. Prepare all portfolio data (multi-portfolio, single-pass calculation)
         optimized_data = prepare_multiple_portfolio_data(
@@ -136,7 +145,8 @@ def run_optimization(
             df_prices,
             portfolios_dict,
             bmk_series,
-            period_days
+            period_days,
+            beta_benchmark_series=bmk_beta_series,
         )
         
         # 6. Add benchmark name for display
@@ -148,7 +158,14 @@ def run_optimization(
         return True
         
     except Exception as e:
-        st.error(f"❌ Error during optimization: {str(e)}")
+        if enforce_ucits_5_10_40 and "infeasible" in str(e).lower():
+            st.error(
+                "No portfolio satisfies the UCITS 5/10/40 limits for every observation date "
+                "with the current tickers and target settings. Try a broader stock selection, "
+                "a different observation period, or less restrictive target settings."
+            )
+        else:
+            st.error(f"❌ Error during optimization: {str(e)}")
         return False
 
 
@@ -156,7 +173,8 @@ def run_optimization(
 # SIDEBAR INPUT SECTION
 # ============================================================================
 
-tickers, benchmark_name, benchmark_ticker, reporting_currency, target_return, target_risk, target_te = display_sidebar_inputs()
+(manual_tickers, sector_random_counts, enforce_ucits_5_10_40, benchmark_name, benchmark_ticker,
+ reporting_currency, target_return, target_risk, target_te) = display_sidebar_inputs()
 
 # Date inputs
 today = datetime.date.today()
@@ -171,9 +189,21 @@ end_date = st.sidebar.date_input(
 
 # Optimize button
 if st.sidebar.button("Optimize"):
-    ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+    entered_tickers = [
+        ticker.strip().upper()
+        for ticker in manual_tickers.replace("\n", ",").split(",")
+        if ticker.strip()
+    ]
+    duplicate_tickers = sorted(
+        ticker for ticker, count in Counter(entered_tickers).items() if count > 1
+    )
+    ticker_list = list(dict.fromkeys(entered_tickers))
     
-    if not ticker_list:
+    if duplicate_tickers:
+        st.error(
+            f"Remove duplicate tickers before optimizing: {', '.join(duplicate_tickers)}."
+        )
+    elif not ticker_list:
         st.error("Please enter at least one valid ticker.")
     elif len(ticker_list) > config.MAX_TICKERS:
         st.error(f"Please enter no more than {config.MAX_TICKERS} tickers.")
@@ -187,7 +217,8 @@ if st.sidebar.button("Optimize"):
             reporting_currency,
             target_return=target_return,
             target_risk=target_risk,
-            target_te=target_te
+            target_te=target_te,
+            enforce_ucits_5_10_40=enforce_ucits_5_10_40,
         )
 
 

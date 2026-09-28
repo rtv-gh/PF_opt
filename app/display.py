@@ -8,6 +8,8 @@ Supports multiple portfolio types (Max Sharpe, Min Variance, etc.) with
 flexible layout and display options.
 """
 
+from collections import Counter
+import random
 from typing import Dict, Optional, Tuple, List, Any
 import pandas as pd
 import streamlit as st
@@ -20,22 +22,139 @@ from app.config import (  # type: ignore
     BENCHMARKS, DEFAULT_TICKERS, DEFAULT_REPORTING_CURRENCY,
     DEFAULT_BENCHMARK
 )
+from app.export import generate_portfolio_csv
+from utils import load_gics_sector_stocks
 
 
-def display_sidebar_inputs() -> Tuple[str, str, str, str, Optional[float], Optional[float], Optional[float]]:
+def build_portfolio_tickers(
+    manual_tickers: str,
+    sector_random_counts: Dict[str, int],
+) -> List[str]:
+    """Combine manual tickers with unique random constituents from each sector."""
+    manual_symbols = [
+        ticker.strip().upper()
+        for ticker in manual_tickers.replace("\n", ",").split(",")
+        if ticker.strip()
+    ]
+    ticker_list = list(dict.fromkeys(manual_symbols))
+    selected_tickers = set(ticker_list)
+    stock_data = load_gics_sector_stocks()
+
+    for sector, requested_count in sector_random_counts.items():
+        if requested_count <= 0:
+            continue
+        sector_symbols = stock_data.loc[
+            stock_data["GICS Sector"] == sector, "Symbol"
+        ].tolist()
+        available_symbols = [
+            ticker for ticker in sector_symbols if ticker not in selected_tickers
+        ]
+        random_tickers = random.sample(
+            available_symbols,
+            k=min(requested_count, len(available_symbols)),
+        )
+        ticker_list.extend(random_tickers)
+        selected_tickers.update(random_tickers)
+
+    return ticker_list
+
+
+def display_sidebar_inputs() -> Tuple[
+    str, Dict[str, int], bool, str, str, str,
+    Optional[float], Optional[float], Optional[float]
+]:
     """
     Display user input controls in the sidebar.
     
     Returns:
-        Tuple of (tickers, benchmark_name, benchmark_ticker, reporting_currency, target_return, target_risk, target_te)
+        Tuple of (manual_tickers, sector_random_counts, enforce_ucits_5_10_40, benchmark_name,
+        benchmark_ticker, reporting_currency, target_return, target_risk, target_te)
         where target_return, target_risk, and target_te are optional (None if not specified by user)
     """
     st.sidebar.header("User Inputs")
-    
-    tickers = st.sidebar.text_input(
-        "Enter Tickers (comma separated)",
-        value=DEFAULT_TICKERS
+    enforce_ucits_5_10_40 = st.sidebar.checkbox(
+        "Constrain to UCITS 5/10/40",
+        value=False,
+        help=(
+            "Keep each issuer at or below 10% and the largest eight issuers at or below 40% "
+            "throughout the observation period. This conservative constraint may exclude "
+            "some otherwise-compliant portfolios."
+        ),
     )
+    stocks = load_gics_sector_stocks()
+    sectors = sorted(stocks["GICS Sector"].dropna().unique().tolist())
+
+    def add_random_stocks() -> None:
+        requested_counts = {
+            sector: int(st.session_state.get(f"random_count_{sector}", 0))
+            for sector in sectors
+        }
+        current_tickers = st.session_state.get("manual_tickers_input", DEFAULT_TICKERS)
+        added_tickers = build_portfolio_tickers(current_tickers, requested_counts)
+        st.session_state["manual_tickers_input"] = ", ".join(added_tickers)
+        for sector in sectors:
+            st.session_state[f"random_count_{sector}"] = 0
+
+    title_column, add_column = st.sidebar.columns([4, 1])
+    title_column.subheader("Random Stocks by GICS Sector")
+    with add_column:
+        st.button(
+            "Add",
+            key="add_random_sector_stocks",
+            on_click=add_random_stocks,
+            help="Add the requested random stocks to the manual ticker list.",
+        )
+
+    sector_random_counts: Dict[str, int] = {}
+    for sector in sectors:
+        sector_stocks = stocks[stocks["GICS Sector"] == sector]
+        sector_label, count_input = st.sidebar.columns([3, 1])
+        sector_label.markdown(f"**{sector}**")
+        with count_input:
+            sector_random_counts[sector] = st.number_input(
+                f"Random stock count for {sector}",
+                min_value=0,
+                max_value=len(sector_stocks),
+                value=0,
+                step=1,
+                label_visibility="collapsed",
+                key=f"random_count_{sector}",
+            )
+
+    st.sidebar.subheader("Manually Add Tickers")
+    manual_tickers = st.sidebar.text_area(
+        "Enter individual tickers (comma or newline separated)",
+        value=DEFAULT_TICKERS,
+        height=100,
+        key="manual_tickers_input",
+    )
+    manual_symbols = [
+        ticker.strip().upper()
+        for ticker in manual_tickers.replace("\n", ",").split(",")
+        if ticker.strip()
+    ]
+    st.sidebar.caption(f"Selected stocks: {len(set(manual_symbols))}")
+    duplicate_tickers = sorted(
+        ticker for ticker, count in Counter(manual_symbols).items() if count > 1
+    )
+    if duplicate_tickers:
+        st.sidebar.warning(
+            f"Duplicate tickers found: {', '.join(duplicate_tickers)}. "
+            "Each ticker should appear only once."
+        )
+
+    manual_set = set(manual_symbols)
+    unavailable_counts = []
+    for sector, requested_count in sector_random_counts.items():
+        sector_symbols = set(stocks.loc[stocks["GICS Sector"] == sector, "Symbol"])
+        available_count = len(sector_symbols - manual_set)
+        if requested_count > available_count:
+            unavailable_counts.append(f"{sector}: {available_count} available")
+    if unavailable_counts:
+        st.sidebar.warning(
+            "Some random counts exceed the unselected stocks remaining: "
+            + "; ".join(unavailable_counts)
+        )
     
     st.sidebar.subheader("Benchmark")
     benchmark_name = st.sidebar.selectbox(
@@ -79,7 +198,17 @@ def display_sidebar_inputs() -> Tuple[str, str, str, str, Optional[float], Optio
     )
     target_te = target_te_pct / 100.0 if target_te_pct is not None else None
     
-    return tickers, benchmark_name, benchmark_ticker, reporting_currency, target_return, target_risk, target_te
+    return (
+        manual_tickers,
+        sector_random_counts,
+        enforce_ucits_5_10_40,
+        benchmark_name,
+        benchmark_ticker,
+        reporting_currency,
+        target_return,
+        target_risk,
+        target_te,
+    )
 
 
 def display_pie_chart(
@@ -133,7 +262,8 @@ def display_pie_chart(
 def display_holdings_table(
     holdings_df: pd.DataFrame,
     portfolio_type: str = "max_sharpe",
-    title: Optional[str] = None
+    title: Optional[str] = None,
+    comparison_df: Optional[pd.DataFrame] = None,
 ) -> Optional[pd.DataFrame]:
     """
     Display holdings table with metadata.
@@ -142,6 +272,7 @@ def display_holdings_table(
         holdings_df: DataFrame with Ticker, Security, GICS Sector, Weight Start, Weight End
         portfolio_type: Portfolio type for display
         title: Optional custom title
+        comparison_df: Matching portfolio and benchmark metrics
     
     Returns:
         Formatted holdings DataFrame for display
@@ -149,26 +280,47 @@ def display_holdings_table(
     if title is None:
         title = _get_portfolio_display_title(portfolio_type, "Holdings")
     
-    st.subheader(title)
-    
     if holdings_df.empty:
         st.warning("No holdings data available.")
         return None
+
+    title_col, export_col = st.columns([5, 1])
+    with title_col:
+        st.subheader(title)
+    with export_col:
+        st.download_button(
+            "Export CSV",
+            data=generate_portfolio_csv(
+                holdings_df,
+                comparison_df if comparison_df is not None else pd.DataFrame(),
+            ),
+            file_name=f"{portfolio_type}_report.csv",
+            mime="text/csv",
+            icon=":material/download:",
+            key=f"holdings_csv_{portfolio_type}",
+        )
     
     # Make a copy for display and format percentages
     holdings_display = holdings_df.copy()
     holdings_display["Weight Start"] = holdings_display["Weight Start"].map("{:.2%}".format)
     holdings_display["Weight End"] = holdings_display["Weight End"].map("{:.2%}".format)
+    if "Beta to Benchmark" in holdings_display:
+        holdings_display["Beta to Benchmark"] = holdings_display["Beta to Benchmark"].map("{:.2f}".format)
+    if "Return Contribution" in holdings_display:
+        holdings_display["Return Contribution"] = holdings_display["Return Contribution"].map("{:+.2%}".format)
     
     # Determine columns to display
     display_cols = [col for col in holdings_display.columns if col in
-                    ["Ticker", "Security", "GICS Sector", "Weight Start", "Weight End"]]
+                    ["Ticker", "Security", "GICS Sector", "Weight Start", "Weight End",
+                     "Beta to Benchmark", "Return Contribution"]]
     
     # Create column config for narrow columns
     column_config = {
         "Ticker": st.column_config.TextColumn(width=COLUMN_WIDTH_SMALL),
         "Weight Start": st.column_config.TextColumn(width=COLUMN_WIDTH_SMALL),
         "Weight End": st.column_config.TextColumn(width=COLUMN_WIDTH_SMALL),
+        "Beta to Benchmark": st.column_config.TextColumn(width=COLUMN_WIDTH_SMALL),
+        "Return Contribution": st.column_config.TextColumn(width=COLUMN_WIDTH_SMALL),
     }
     if "Security" in display_cols:
         column_config["Security"] = st.column_config.TextColumn(width=COLUMN_WIDTH_MEDIUM)
@@ -270,6 +422,17 @@ def display_cumulative_returns_chart(
         labels={"value": "Cumulative Return (%)", "index": "Date"},
         template="plotly_white"
     )
+    line_styles = {
+        "Benchmark": {"color": "#000000", "dash": "dot", "width": 2.5},
+        "Min Volatility": {"color": "#006400", "dash": "solid", "width": 2.5},
+        "Max Sharpe": {"color": "#D62728", "dash": "solid", "width": 2.5},
+        "Efficient Return": {"color": "#1F77B4", "dash": "solid", "width": 2.5},
+        "Efficient Risk": {"color": "#FF7F0E", "dash": "solid", "width": 2.5},
+        "Efficient TE": {"color": "#FF7F0E", "dash": "dot", "width": 2.5},
+    }
+    for trace in fig.data:
+        if trace.name in line_styles:
+            trace.update(line=line_styles[trace.name])
     
     # Improve x-axis
     fig.update_xaxes(
@@ -313,20 +476,28 @@ def display_portfolio_column(
             - holdings_df: Holdings DataFrame
             - comparison_df: Comparison DataFrame
     """
-    display_pie_chart(
-        portfolio_data.get("weights", {}),
-        portfolio_type=portfolio_type
-    )
-    
-    display_holdings_table(
-        portfolio_data.get("holdings_df", pd.DataFrame()),
-        portfolio_type=portfolio_type
-    )
-    
-    display_metrics_table(
-        portfolio_data.get("comparison_df", pd.DataFrame()),
-        portfolio_type=portfolio_type
-    )
+    st.subheader(_get_portfolio_display_title(portfolio_type))
+    holdings_col, metrics_col = st.columns([1.5, 1])
+    with holdings_col:
+        display_holdings_table(
+            portfolio_data.get("holdings_df", pd.DataFrame()),
+            portfolio_type=portfolio_type,
+            comparison_df=portfolio_data.get("comparison_df", pd.DataFrame()),
+        )
+    with metrics_col:
+        display_metrics_table(
+            portfolio_data.get("comparison_df", pd.DataFrame()),
+            portfolio_type=portfolio_type
+        )
+        if portfolio_data.get("ucits_5_10_40_compliant", False):
+            st.success("This portfolio is compliant with the 5/10/40 UCITS rules.")
+        else:
+            st.warning("This portfolio is not compliant with the 5/10/40 UCITS rules.")
+    with st.expander("Portfolio allocation"):
+        display_pie_chart(
+            portfolio_data.get("weights", {}),
+            portfolio_type=portfolio_type
+        )
 
 
 def display_multiple_portfolios(optimized_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -334,15 +505,7 @@ def display_multiple_portfolios(optimized_data: Dict[str, Any]) -> Optional[Dict
     Display multiple portfolios with flexible layout for varying portfolio counts.
     
     This is the main display orchestration function for multi-portfolio analysis.
-    Supports dynamic layouts:
-    - 2 portfolios: 1 row of 2
-    - 3 portfolios: 1 row of 2, then 1 row of 3
-    - 4 portfolios: 2 rows of 2
-    - 5 portfolios: 1 row of 2, then 1 row of 3
-    
-    Layout:
-    - Row 1-N: Flexible columns (Pie charts, Holdings, Metrics with adaptive layout)
-    - Final Row: Combined performance chart (all portfolios vs benchmark)
+    Each portfolio is displayed as a section, with holdings beside its metrics.
     
     Args:
         optimized_data: Multi-portfolio data structure from prepare_multiple_portfolio_data()
@@ -369,112 +532,8 @@ def display_multiple_portfolios(optimized_data: Dict[str, Any]) -> Optional[Dict
     if len(portfolio_types) == 1:
         return _display_single_portfolio_legacy(optimized_data)
     
-    def _display_section(section_type):
-        """Helper to display a section (pie charts, holdings, or metrics) with adaptive layout"""
-        # First row: portfolios 0-1 (2 columns)
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            if section_type == "pie":
-                display_pie_chart(
-                    portfolios[portfolio_types[0]].get("weights", {}),
-                    portfolio_type=portfolio_types[0]
-                )
-            elif section_type == "holdings":
-                display_holdings_table(
-                    portfolios[portfolio_types[0]].get("holdings_df", pd.DataFrame()),
-                    portfolio_type=portfolio_types[0]
-                )
-            else:  # metrics
-                display_metrics_table(
-                    portfolios[portfolio_types[0]].get("comparison_df", pd.DataFrame()),
-                    portfolio_type=portfolio_types[0]
-                )
-        
-        if len(portfolio_types) >= 2:
-            with col2:
-                if section_type == "pie":
-                    display_pie_chart(
-                        portfolios[portfolio_types[1]].get("weights", {}),
-                        portfolio_type=portfolio_types[1]
-                    )
-                elif section_type == "holdings":
-                    display_holdings_table(
-                        portfolios[portfolio_types[1]].get("holdings_df", pd.DataFrame()),
-                        portfolio_type=portfolio_types[1]
-                    )
-                else:  # metrics
-                    display_metrics_table(
-                        portfolios[portfolio_types[1]].get("comparison_df", pd.DataFrame()),
-                        portfolio_type=portfolio_types[1]
-                    )
-        
-        # Remaining portfolios: Display in their own row(s)
-        if len(portfolio_types) > 2:
-            remaining_types = portfolio_types[2:]
-            if len(remaining_types) <= 3:
-                # Display 3 or fewer remaining portfolios in one row
-                cols = st.columns(len(remaining_types))
-                for idx, col in enumerate(cols):
-                    with col:
-                        if section_type == "pie":
-                            display_pie_chart(
-                                portfolios[remaining_types[idx]].get("weights", {}),
-                                portfolio_type=remaining_types[idx]
-                            )
-                        elif section_type == "holdings":
-                            display_holdings_table(
-                                portfolios[remaining_types[idx]].get("holdings_df", pd.DataFrame()),
-                                portfolio_type=remaining_types[idx]
-                            )
-                        else:  # metrics
-                            display_metrics_table(
-                                portfolios[remaining_types[idx]].get("comparison_df", pd.DataFrame()),
-                                portfolio_type=remaining_types[idx]
-                            )
-            else:
-                # Display 4+ remaining portfolios in pairs
-                for i in range(0, len(remaining_types), 2):
-                    cols = st.columns(2)
-                    with cols[0]:
-                        if section_type == "pie":
-                            display_pie_chart(
-                                portfolios[remaining_types[i]].get("weights", {}),
-                                portfolio_type=remaining_types[i]
-                            )
-                        elif section_type == "holdings":
-                            display_holdings_table(
-                                portfolios[remaining_types[i]].get("holdings_df", pd.DataFrame()),
-                                portfolio_type=remaining_types[i]
-                            )
-                        else:  # metrics
-                            display_metrics_table(
-                                portfolios[remaining_types[i]].get("comparison_df", pd.DataFrame()),
-                                portfolio_type=remaining_types[i]
-                            )
-                    
-                    if i + 1 < len(remaining_types):
-                        with cols[1]:
-                            if section_type == "pie":
-                                display_pie_chart(
-                                    portfolios[remaining_types[i + 1]].get("weights", {}),
-                                    portfolio_type=remaining_types[i + 1]
-                                )
-                            elif section_type == "holdings":
-                                display_holdings_table(
-                                    portfolios[remaining_types[i + 1]].get("holdings_df", pd.DataFrame()),
-                                    portfolio_type=remaining_types[i + 1]
-                                )
-                            else:  # metrics
-                                display_metrics_table(
-                                    portfolios[remaining_types[i + 1]].get("comparison_df", pd.DataFrame()),
-                                    portfolio_type=remaining_types[i + 1]
-                                )
-    
-    # Display all sections with adaptive layout
-    _display_section("pie")
-    _display_section("holdings")
-    _display_section("metrics")
+    for portfolio_type in portfolio_types:
+        display_portfolio_column(portfolio_type, portfolios[portfolio_type])
     
     # Combined performance chart (spanning full width)
     fig_chart = display_cumulative_returns_chart(
@@ -498,31 +557,12 @@ def _display_single_portfolio_legacy(optimized_data: Dict[str, Any]) -> Optional
     portfolio_type = list(portfolios.keys())[0]
     portfolio_data = portfolios[portfolio_type]
     
-    # 1. Pie chart
-    fig_pie = display_pie_chart(
-        portfolio_data.get("weights", {}),
-        portfolio_type=portfolio_type
-    )
-    
-    # 2. Holdings table
-    holdings_display = display_holdings_table(
-        portfolio_data.get("holdings_df", pd.DataFrame()),
-        portfolio_type=portfolio_type
-    )
-    
-    # 3. Metrics table
-    display_metrics_table(
-        portfolio_data.get("comparison_df", pd.DataFrame()),
-        portfolio_type=portfolio_type
-    )
-    
-    # 4. Cumulative returns chart
+    display_portfolio_column(portfolio_type, portfolio_data)
     fig_chart = display_cumulative_returns_chart(
         optimized_data.get("chart_data", pd.DataFrame()),
         benchmark_name="Benchmark"
     )
-    
-    return fig_pie, fig_chart, holdings_display
+    return {"fig_chart": fig_chart}
 
 
 def display_optimization_section(data: Dict) -> Optional[Tuple]:
@@ -568,7 +608,11 @@ def display_optimization_section(data: Dict) -> Optional[Tuple]:
         fig_pie = display_pie_chart(data.get("weights", {}), portfolio_type="max_sharpe")
         
         # 2. Holdings table
-        holdings_display = display_holdings_table(data.get("holdings_df", pd.DataFrame()), portfolio_type="max_sharpe")
+        holdings_display = display_holdings_table(
+            data.get("holdings_df", pd.DataFrame()),
+            portfolio_type="max_sharpe",
+            comparison_df=data.get("comparison_df", pd.DataFrame()),
+        )
         
         # 3. Metrics table
         display_metrics_table(data.get("comparison_df", pd.DataFrame()), portfolio_type="max_sharpe")

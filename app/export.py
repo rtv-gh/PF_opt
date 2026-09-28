@@ -9,16 +9,79 @@ Charts are actual editable Excel objects, not embedded images, which provides be
 compatibility and professional appearance.
 """
 
+import csv
 from typing import Dict
-from io import BytesIO
+from io import BytesIO, StringIO
 import pandas as pd
 
 from openpyxl import Workbook  # type: ignore
-from openpyxl.chart import PieChart, LineChart, Reference as ChartReference  # type: ignore
+from openpyxl.chart import BarChart, PieChart, LineChart, Reference as ChartReference  # type: ignore
+from openpyxl.chart.marker import Marker  # type: ignore
 from openpyxl.utils import get_column_letter  # type: ignore
 from openpyxl.styles import Font, PatternFill  # type: ignore
 
 from app.config import EXCEL_MAX_COLUMN_WIDTH  # type: ignore
+
+
+def generate_portfolio_csv(
+    holdings_df: pd.DataFrame,
+    comparison_df: pd.DataFrame,
+) -> bytes:
+    """Export summary metrics first, with the holdings header on row 15."""
+    output = StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(["Portfolio Summary Metrics"])
+    writer.writerow(["Metric", "Portfolio", "Benchmark"])
+
+    for metric, values in comparison_df.iterrows():
+        writer.writerow([metric, values.get("Portfolio", ""), values.get("Benchmark", "")])
+
+    holdings_header_row = 15
+    rows_before_holdings = 2 + len(comparison_df)
+    if rows_before_holdings >= holdings_header_row:
+        raise ValueError(
+            "The holdings table cannot start on row 15 when the metrics section has more than 12 rows"
+        )
+    while rows_before_holdings < holdings_header_row - 1:
+        writer.writerow([])
+        rows_before_holdings += 1
+
+    writer.writerow(holdings_df.columns.tolist())
+    clean_holdings = holdings_df.astype(object).where(pd.notna(holdings_df), "")
+    writer.writerows(clean_holdings.itertuples(index=False, name=None))
+    return output.getvalue().encode("utf-8")
+
+
+def _write_time_series_sheet(wb: Workbook, sheet_name: str, title: str, data: pd.DataFrame):
+    ws = wb.create_sheet(title=sheet_name)
+    ws["A1"] = title
+    ws["A1"].font = Font(bold=True, size=14, color="263746")
+
+    header_row = 2
+    headers = ["Date", *data.columns.tolist()]
+    for col_idx, column_name in enumerate(headers, 1):
+        cell = ws.cell(row=header_row, column=col_idx, value=column_name)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill(start_color="263746", end_color="263746", fill_type="solid")
+        ws.column_dimensions[get_column_letter(col_idx)].width = 14 if col_idx == 1 else 20
+
+    for row_idx, (date_value, values) in enumerate(data.iterrows(), header_row + 1):
+        date_cell = ws.cell(
+            row=row_idx,
+            column=1,
+            value=date_value.to_pydatetime() if hasattr(date_value, "to_pydatetime") else date_value,
+        )
+        date_cell.number_format = "yyyy-mm-dd"
+        for col_idx, value in enumerate(values, 2):
+            cell = ws.cell(row=row_idx, column=col_idx, value=float(value) if pd.notna(value) else None)
+            cell.number_format = "0.00%;[Red]-0.00%"
+
+    last_data_row = header_row + len(data)
+    last_data_col = len(headers)
+    ws.freeze_panes = "B3"
+    if len(data.columns):
+        ws.auto_filter.ref = f"A{header_row}:{get_column_letter(last_data_col)}{last_data_row}"
+    return ws, header_row, last_data_row, last_data_col
 
 
 def generate_excel_multiple_portfolios(optimized_data: dict) -> BytesIO:
@@ -90,10 +153,14 @@ def generate_excel_multiple_portfolios(optimized_data: dict) -> BytesIO:
             comparison_df = portfolio_data.get("comparison_df", pd.DataFrame())
             
             # Write metric names column
-            ws.cell(row=startrow_metrics, column=1, value="Metric").font = Font(bold=True)
+            metric_header = ws.cell(row=startrow_metrics, column=1, value="Metric")
+            metric_header.font = Font(bold=True, color="FFFFFF")
+            metric_header.fill = PatternFill(start_color="263746", end_color="263746", fill_type="solid")
             for col_name in comparison_df.columns:
                 col_idx = list(comparison_df.columns).index(col_name) + 2
-                ws.cell(row=startrow_metrics, column=col_idx, value=col_name).font = Font(bold=True)
+                cell = ws.cell(row=startrow_metrics, column=col_idx, value=col_name)
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.fill = PatternFill(start_color="263746", end_color="263746", fill_type="solid")
             
             # Write metric rows
             for row_offset, (metric_name, row_data) in enumerate(comparison_df.iterrows(), 1):
@@ -128,7 +195,12 @@ def generate_excel_multiple_portfolios(optimized_data: dict) -> BytesIO:
             # Write holdings table data
             for row_idx, row_data in enumerate(holdings_display.values, holdings_data_row + 1):
                 for col_idx, value in enumerate(row_data, 1):
-                    ws.cell(row=row_idx, column=col_idx, value=value)
+                    cell = ws.cell(row=row_idx, column=col_idx, value=value)
+                    column_name = holdings_display.columns[col_idx - 1]
+                    if column_name in {"Weight Start", "Weight End", "Return Contribution"}:
+                        cell.number_format = "0.00%;[Red]-0.00%"
+                    elif column_name == "Beta to Benchmark":
+                        cell.number_format = "0.00"
             
             # Adjust column widths
             for col_idx, col_name in enumerate(holdings_display.columns, 1):
@@ -139,6 +211,11 @@ def generate_excel_multiple_portfolios(optimized_data: dict) -> BytesIO:
                 ws.column_dimensions[col_letter].width = min(max_length + 2, EXCEL_MAX_COLUMN_WIDTH)
             
             holdings_last_row = holdings_data_row + len(holdings_display)
+            ws.auto_filter.ref = (
+                f"A{holdings_data_row}:{get_column_letter(len(holdings_display.columns))}{holdings_last_row}"
+                if len(holdings_display.columns) else None
+            )
+            ws.freeze_panes = f"A{startrow_metrics + 1}"
             
             # =====================================================================
             # SECTION 4: PIE CHART DATA AND CHART
@@ -258,6 +335,102 @@ def generate_excel_multiple_portfolios(optimized_data: dict) -> BytesIO:
                 line_chart.set_categories(x_data_ref)
                 
                 ws.add_chart(line_chart, f'C{line_chart_section_row + 1}')
+
+        # Prepare daily return series for the daily and cumulative worksheets.
+        time_series = optimized_data.get("time_series", pd.DataFrame()).copy()
+        if time_series.empty:
+            time_series = pd.DataFrame({
+                portfolio_display_names.get(key, key.replace("_", " ").title()): value.get("daily_rets", pd.Series(dtype=float))
+                for key, value in portfolios.items()
+            })
+            benchmark = optimized_data.get("benchmark", {}).get("daily_rets", pd.Series(dtype=float))
+            if not benchmark.empty:
+                time_series["Benchmark"] = benchmark
+
+        daily_ws, header_row, last_daily_row, last_daily_col = _write_time_series_sheet(
+            wb, "ts_daily", "Daily Portfolio and Benchmark Returns", time_series
+        )
+        daily_portfolio_columns = [
+            index + 2 for index, name in enumerate(time_series.columns) if name != "Benchmark"
+        ]
+        if last_daily_row > header_row and daily_portfolio_columns:
+            daily_chart = BarChart()
+            daily_chart.type = "col"
+            daily_chart.grouping = "clustered"
+            daily_chart.overlap = 0
+            daily_chart.style = 10
+            daily_chart.title = "Daily Portfolio Returns"
+            daily_chart.y_axis.title = "Daily Return"
+            daily_chart.y_axis.numFmt = "0.00%"
+            daily_chart.x_axis.title = "Date"
+            daily_chart.height = 10
+            daily_chart.width = 24
+            daily_chart.legend.position = "b"
+            for column in daily_portfolio_columns:
+                portfolio_ref = ChartReference(
+                    daily_ws, min_col=column, max_col=column,
+                    min_row=header_row, max_row=last_daily_row
+                )
+                daily_chart.add_data(portfolio_ref, titles_from_data=True)
+            dates_ref = ChartReference(
+                daily_ws, min_col=1, min_row=header_row + 1, max_row=last_daily_row
+            )
+            daily_chart.set_categories(dates_ref)
+
+            if "Benchmark" in time_series.columns:
+                benchmark_column = time_series.columns.get_loc("Benchmark") + 2
+                benchmark_chart = LineChart()
+                benchmark_ref = ChartReference(
+                    daily_ws, min_col=benchmark_column, max_col=benchmark_column,
+                    min_row=header_row, max_row=last_daily_row
+                )
+                benchmark_chart.add_data(benchmark_ref, titles_from_data=True)
+                benchmark_chart.set_categories(dates_ref)
+                benchmark_series = benchmark_chart.ser[0]
+                benchmark_series.marker = Marker(symbol="diamond", size=6)
+                benchmark_series.marker.graphicalProperties.solidFill = "000000"
+                benchmark_series.marker.graphicalProperties.line.solidFill = "000000"
+                benchmark_series.graphicalProperties.line.noFill = True
+                daily_chart += benchmark_chart
+
+            daily_ws.add_chart(daily_chart, f"{get_column_letter(last_daily_col + 3)}2")
+
+        cumulative_series = optimized_data.get("chart_data", pd.DataFrame()).copy()
+        if cumulative_series.empty and not time_series.empty:
+            cumulative_series = (1 + time_series.fillna(0)).cumprod() - 1
+
+        cumulative_ws, header_row, last_cumulative_row, last_cumulative_col = _write_time_series_sheet(
+            wb, "ts_cumulative", "Cumulative Portfolio and Benchmark Returns", cumulative_series
+        )
+        if last_cumulative_row > header_row and last_cumulative_col > 1:
+            cumulative_chart = LineChart()
+            cumulative_chart.title = "Cumulative Returns by Portfolio and Benchmark"
+            cumulative_chart.style = 12
+            cumulative_chart.y_axis.title = "Cumulative Return"
+            cumulative_chart.y_axis.numFmt = "0.00%"
+            cumulative_chart.x_axis.title = "Date"
+            cumulative_chart.height = 10
+            cumulative_chart.width = 24
+            cumulative_chart.legend.position = "b"
+            cumulative_ref = ChartReference(
+                cumulative_ws, min_col=2, max_col=last_cumulative_col,
+                min_row=header_row, max_row=last_cumulative_row
+            )
+            cumulative_dates_ref = ChartReference(
+                cumulative_ws, min_col=1, min_row=header_row + 1,
+                max_row=last_cumulative_row
+            )
+            cumulative_chart.add_data(cumulative_ref, titles_from_data=True)
+            cumulative_chart.set_categories(cumulative_dates_ref)
+            for series, column_name in zip(cumulative_chart.ser, cumulative_series.columns):
+                if column_name == "Benchmark":
+                    series.graphicalProperties.line.solidFill = "000000"
+                    series.graphicalProperties.line.prstDash = "sysDot"
+                    series.graphicalProperties.line.width = 24000
+            cumulative_ws.add_chart(
+                cumulative_chart,
+                f"{get_column_letter(last_cumulative_col + 3)}2",
+            )
         
         # =====================================================================
         # SAVE WORKBOOK TO BUFFER

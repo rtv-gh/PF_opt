@@ -18,7 +18,7 @@ BENCHMARKS: Dict[str, str] = {
 # ============================================================================
 # DEFAULT VALUES
 # ============================================================================
-DEFAULT_TICKERS = "AAPL,MA,META,V,AMZN,BA,BAC,BK,C,GS,JPM,MS,STT,WFC,LLY,BSX,JNJ,XOM,MDT,MSFT,GOOGL,NVDA,AVGO,CRM,UNH"
+DEFAULT_TICKERS = "AAPL,MA,META,V,AMZN,BA,BAC,BNY,C,GS,JPM,MS,STT,WFC,LLY,BSX,JNJ,XOM,MDT,MSFT,GOOGL,NVDA,AVGO,CRM,UNH"
 DEFAULT_REPORTING_CURRENCY = "USD"
 DEFAULT_BENCHMARK = "S&P 500"
 
@@ -34,15 +34,15 @@ METRICS_ANNUALIZED = [
     "Annualised Return",
     "Annualised Volatility",
     "Sharpe Ratio",
-    "Tracking Error"
+    "Maximum Drawdown",
+    "Tracking Error",
+    "Portfolio Beta",
+    "Information Ratio",
+    "Largest Relative Return Contributor",
+    "Largest Relative Return Detractor",
 ]
 
-METRICS_PERIOD = [
-    "Cumulative Return",
-    "Period Volatility",
-    "Period Sharpe",
-    "Tracking Error"
-]
+METRICS_PERIOD = METRICS_ANNUALIZED
 
 # ============================================================================
 # UI COLUMN WIDTHS

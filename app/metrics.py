@@ -10,6 +10,7 @@ scalable architecture for future extensions.
 """
 
 from typing import Dict, Tuple, List, Optional, Any
+
 import pandas as pd
 import numpy as np
 
@@ -101,7 +102,8 @@ def prepare_multiple_portfolio_data(
     prices: pd.DataFrame,
     portfolios: Dict[str, Dict[str, float]],
     bmk_series: pd.Series,
-    period_days: int
+    period_days: int,
+    beta_benchmark_series: Optional[pd.Series] = None,
 ) -> Dict[str, Any]:
     """
     Prepare data for multiple portfolio types in a single pass.
@@ -116,6 +118,7 @@ def prepare_multiple_portfolio_data(
                    e.g., {"max_sharpe": {...}, "min_variance": {...}}
         bmk_series: Series of benchmark prices (shared across all portfolios)
         period_days: Number of days in analysis period
+        beta_benchmark_series: Benchmark prices in the same currency as stock prices
     
     Returns:
         Dict with structure:
@@ -145,13 +148,14 @@ def prepare_multiple_portfolio_data(
             "annualize": bool,
         }
     """
-    annualize = period_days >= ANNUALIZATION_THRESHOLD_DAYS
-    
     # Compute benchmark metrics once (shared across all portfolios)
     bmk_daily_rets = bmk_series.pct_change().dropna()
+    beta_benchmark_prices = (
+        beta_benchmark_series if beta_benchmark_series is not None else bmk_series
+    )
+    beta_benchmark_returns = beta_benchmark_prices.pct_change().dropna()
     bmk_cum_rets = (bmk_series / bmk_series.iloc[0]) - 1
     bmk_cum_ret_final = bmk_cum_rets.iloc[-1] if len(bmk_cum_rets) > 0 else 0
-    bmk_perf = calculate_series_metrics(bmk_series, annualize=annualize)
     bmk_period_metrics = calculate_period_metrics(bmk_daily_rets, bmk_cum_ret_final, len(bmk_daily_rets))
     
     # Compute data for each portfolio type
@@ -159,16 +163,71 @@ def prepare_multiple_portfolio_data(
     cumulative_returns_dict = {"Benchmark": bmk_cum_rets}
     
     for portfolio_type, weights in portfolios.items():
-        # Calculate portfolio returns
-        port_returns = prices.pct_change().dropna()
-        port_daily_rets = (port_returns * pd.Series(weights)).sum(axis=1)
+        # The optimizer uses fixed daily weights, so all metrics use that same return series.
+        asset_returns = prices.pct_change().dropna()
+        weight_series = pd.Series(weights, dtype=float).reindex(prices.columns).fillna(0.0)
+        if weight_series.sum() != 0:
+            weight_series = weight_series / weight_series.sum()
+        aligned_returns = pd.concat(
+            [asset_returns, bmk_daily_rets.rename("Benchmark")], axis=1, join="inner"
+        ).dropna()
+        asset_returns = aligned_returns[asset_returns.columns]
+        benchmark_returns = aligned_returns["Benchmark"]
+        port_daily_rets = asset_returns.mul(weight_series, axis=1).sum(axis=1)
         port_cum_rets = (1 + port_daily_rets).cumprod() - 1
         port_cum_ret_final = port_cum_rets.iloc[-1] if len(port_cum_rets) > 0 else 0
+        bmk_cum_rets = (1 + benchmark_returns).cumprod() - 1
+        bmk_cum_ret_final = bmk_cum_rets.iloc[-1] if len(bmk_cum_rets) > 0 else 0
         
-        # Calculate portfolio metrics
-        port_perf = calculate_series_metrics(prices.mean(axis=1), annualize=True)
-        tracking_error = calculate_tracking_error(port_daily_rets, bmk_daily_rets)
+        # Annualize both portfolio and benchmark risk regardless of observation length.
+        port_perf = _calculate_annualized_return_metrics(port_daily_rets)
+        bmk_perf = _calculate_annualized_return_metrics(benchmark_returns)
+        active_returns = port_daily_rets - benchmark_returns
+        tracking_error = active_returns.std() * np.sqrt(252)
+        information_ratio = (
+            active_returns.mean() / active_returns.std() * np.sqrt(252)
+            if active_returns.std() != 0 else 0.0
+        )
+        beta_aligned_returns = pd.concat(
+            [prices.pct_change().dropna(), beta_benchmark_returns.rename("Beta Benchmark")],
+            axis=1,
+            join="inner",
+        ).dropna()
+        beta_benchmark_aligned = beta_aligned_returns["Beta Benchmark"]
+        benchmark_variance = beta_benchmark_aligned.var()
+        portfolio_beta = (
+            beta_aligned_returns[prices.columns].mul(weight_series, axis=1).sum(axis=1)
+            .cov(beta_benchmark_aligned) / benchmark_variance
+            if benchmark_variance != 0 else 0.0
+        )
+        port_max_drawdown = _calculate_max_drawdown(port_daily_rets)
+        bmk_max_drawdown = _calculate_max_drawdown(benchmark_returns)
         port_period_metrics = calculate_period_metrics(port_daily_rets, port_cum_ret_final, len(port_daily_rets))
+        bmk_period_metrics = calculate_period_metrics(benchmark_returns, bmk_cum_ret_final, len(benchmark_returns))
+
+        # Attribute each day's portfolio P&L to its stocks; contributions sum to total return.
+        prior_portfolio_value = (1 + port_daily_rets).cumprod().shift(1, fill_value=1.0)
+        return_contributions = asset_returns.mul(weight_series, axis=1).mul(
+            prior_portfolio_value, axis=0
+        ).sum(axis=0)
+        relative_contributions = return_contributions - weight_series * bmk_cum_ret_final
+        asset_betas = {
+            ticker: (
+                beta_aligned_returns[ticker].cov(beta_benchmark_aligned) / benchmark_variance
+                if benchmark_variance != 0 else 0.0
+            )
+            for ticker in beta_aligned_returns[prices.columns].columns
+        }
+        best_relative = relative_contributions.idxmax() if not relative_contributions.empty else "-"
+        worst_relative = relative_contributions.idxmin() if not relative_contributions.empty else "-"
+        best_relative_label = (
+            f"{best_relative} ({relative_contributions[best_relative]:+.2%})"
+            if best_relative != "-" else "-"
+        )
+        worst_relative_label = (
+            f"{worst_relative} ({relative_contributions[worst_relative]:+.2%})"
+            if worst_relative != "-" else "-"
+        )
         
         # Build comparison DataFrame
         comparison_df = _build_portfolio_comparison_dataframe(
@@ -177,11 +236,24 @@ def prepare_multiple_portfolio_data(
             port_period_metrics=port_period_metrics,
             bmk_period_metrics=bmk_period_metrics,
             tracking_error=tracking_error,
-            period_days=period_days
+            period_days=period_days,
+            portfolio_beta=portfolio_beta,
+            information_ratio=information_ratio,
+            port_max_drawdown=port_max_drawdown,
+            bmk_max_drawdown=bmk_max_drawdown,
+            best_relative_contributor=best_relative_label,
+            worst_relative_contributor=worst_relative_label,
         )
         
         # Build holdings DataFrame
-        holdings_df = build_holdings_dataframe(prices, weights, format_percentages=False)
+        holdings_df = build_holdings_dataframe(
+            prices,
+            weight_series.to_dict(),
+            format_percentages=False,
+            asset_betas=asset_betas,
+            return_contributions=return_contributions.to_dict(),
+        )
+        ucits_compliant = is_ucits_5_10_40_compliant(prices, weight_series.to_dict())
         
         # Store portfolio data
         portfolios_data[portfolio_type] = {
@@ -191,6 +263,9 @@ def prepare_multiple_portfolio_data(
             "perf": port_perf,
             "period_metrics": port_period_metrics,
             "tracking_error": tracking_error,
+            "portfolio_beta": portfolio_beta,
+            "information_ratio": information_ratio,
+            "ucits_5_10_40_compliant": ucits_compliant,
             "holdings_df": holdings_df,
             "comparison_df": comparison_df,
         }
@@ -202,6 +277,12 @@ def prepare_multiple_portfolio_data(
     # Build combined performance chart
     chart_data = pd.DataFrame(cumulative_returns_dict).fillna(0)
     
+    time_series = pd.DataFrame({
+        _get_portfolio_display_name(portfolio_type): portfolio_data["daily_rets"]
+        for portfolio_type, portfolio_data in portfolios_data.items()
+    })
+    time_series["Benchmark"] = bmk_daily_rets
+
     return {
         "portfolios": portfolios_data,
         "benchmark": {
@@ -212,8 +293,9 @@ def prepare_multiple_portfolio_data(
         },
         "prices": prices,
         "period_days": period_days,
-        "annualize": annualize,
+        "annualize": True,
         "chart_data": chart_data,
+        "time_series": time_series,
     }
 
 
@@ -243,49 +325,45 @@ def _build_portfolio_comparison_dataframe(
     port_period_metrics: Tuple[float, float, float],
     bmk_period_metrics: Tuple[float, float, float],
     tracking_error: float,
-    period_days: int
+    period_days: int,
+    portfolio_beta: float = 0.0,
+    information_ratio: float = 0.0,
+    port_max_drawdown: float = 0.0,
+    bmk_max_drawdown: float = 0.0,
+    best_relative_contributor: str = "-",
+    worst_relative_contributor: str = "-",
 ) -> pd.DataFrame:
     """
     Internal function to build comparison DataFrame for a single portfolio.
     
     This is used by both the single-portfolio and multi-portfolio preparation functions.
     """
-    annualize = period_days >= ANNUALIZATION_THRESHOLD_DAYS
-    
-    if annualize:
-        comparison_df = pd.DataFrame({
-            "Portfolio": [
-                f"{port_period_metrics[0]:.1%}",  # Cumulative Return
-                f"{port_perf[0]:.1%}",  # Annualized Return
-                f"{port_perf[1]:.1%}",  # Annualized Volatility
-                f"{port_perf[2]:.2f}",  # Sharpe Ratio
-                f"{tracking_error:.1%}"  # Annualized Tracking Error
-            ],
-            "Benchmark": [
-                f"{bmk_period_metrics[0]:.1%}",  # Cumulative Return
-                f"{bmk_perf[0]:.1%}",  # Annualized Return
-                f"{bmk_perf[1]:.1%}",  # Annualized Volatility
-                f"{bmk_perf[2]:.2f}",  # Sharpe Ratio
-                "-"  # No tracking error for benchmark
-            ]
-        }, index=METRICS_ANNUALIZED)
-    else:
-        comparison_df = pd.DataFrame({
-            "Portfolio": [
-                f"{port_period_metrics[0]:.1%}",  # Cumulative Return
-                f"{port_period_metrics[1]:.1%}",  # Period Volatility
-                f"{port_period_metrics[2]:.2f}",  # Period Sharpe
-                f"{tracking_error:.1%}"  # Annualized Tracking Error
-            ],
-            "Benchmark": [
-                f"{bmk_period_metrics[0]:.1%}",  # Cumulative Return
-                f"{bmk_period_metrics[1]:.1%}",  # Period Volatility
-                f"{bmk_period_metrics[2]:.2f}",  # Period Sharpe
-                "-"  # No tracking error for benchmark
-            ]
-        }, index=METRICS_PERIOD)
-    
-    return comparison_df
+    return pd.DataFrame({
+        "Portfolio": [
+            f"{port_period_metrics[0]:.1%}",
+            f"{port_perf[0]:.1%}",
+            f"{port_perf[1]:.1%}",
+            f"{port_perf[2]:.2f}",
+            f"{port_max_drawdown:.1%}",
+            f"{tracking_error:.1%}",
+            f"{portfolio_beta:.2f}",
+            f"{information_ratio:.2f}",
+            best_relative_contributor,
+            worst_relative_contributor,
+        ],
+        "Benchmark": [
+            f"{bmk_period_metrics[0]:.1%}",
+            f"{bmk_perf[0]:.1%}",
+            f"{bmk_perf[1]:.1%}",
+            f"{bmk_perf[2]:.2f}",
+            f"{bmk_max_drawdown:.1%}",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+        ],
+    }, index=METRICS_ANNUALIZED)
 
 
 def build_comparison_dataframe(
@@ -322,7 +400,9 @@ def build_comparison_dataframe(
 def build_holdings_dataframe(
     prices: pd.DataFrame,
     weights: Dict[str, float],
-    format_percentages: bool = False
+    format_percentages: bool = False,
+    asset_betas: Optional[Dict[str, float]] = None,
+    return_contributions: Optional[Dict[str, float]] = None,
 ) -> pd.DataFrame:
     """
     Build the holdings DataFrame with ticker, name, sector, and weights.
@@ -345,7 +425,9 @@ def build_holdings_dataframe(
     
     holdings = pd.DataFrame({
         "Weight Start": w_start,
-        "Weight End": w_end
+        "Weight End": w_end,
+        "Beta to Benchmark": pd.Series(asset_betas or {}, dtype=float),
+        "Return Contribution": pd.Series(return_contributions or {}, dtype=float),
     }).fillna(0)
     
     # Load metadata and join
@@ -364,16 +446,64 @@ def build_holdings_dataframe(
         holdings["Weight Start"] = holdings["Weight Start"].map("{:.2%}".format)
         holdings["Weight End"] = holdings["Weight End"].map("{:.2%}".format)
     
-    # Ensure column order: Ticker, Security, GICS Sector, Weight Start, Weight End
-    cols = ["Ticker", "Weight Start", "Weight End"]
+    # Ensure column order: identifying fields, weights, then requested stock metrics.
+    cols = ["Ticker", "Weight Start", "Weight End", "Beta to Benchmark", "Return Contribution"]
     if "Security" in holdings.columns:
-        cols = ["Ticker", "Security", "Weight Start", "Weight End"]
+        cols = ["Ticker", "Security", "Weight Start", "Weight End", "Beta to Benchmark", "Return Contribution"]
     if "GICS Sector" in holdings.columns:
-        cols = ["Ticker", "GICS Sector", "Weight Start", "Weight End"]
+        cols = ["Ticker", "GICS Sector", "Weight Start", "Weight End", "Beta to Benchmark", "Return Contribution"]
         if "Security" in holdings.columns:
-            cols = ["Ticker", "Security", "GICS Sector", "Weight Start", "Weight End"]
+            cols = ["Ticker", "Security", "GICS Sector", "Weight Start", "Weight End", "Beta to Benchmark", "Return Contribution"]
     
     return holdings[cols]
+
+
+def _calculate_annualized_return_metrics(returns: pd.Series) -> Tuple[float, float, float]:
+    """Calculate annualized geometric return, volatility, and zero-rate Sharpe ratio."""
+    clean_returns = returns.dropna()
+    if clean_returns.empty:
+        return 0.0, 0.0, 0.0
+
+    volatility = clean_returns.std() * np.sqrt(252)
+    annualized_arithmetic_return = clean_returns.mean() * 252
+    cumulative_growth = (1 + clean_returns).prod()
+    annualized_return = (
+        cumulative_growth ** (252 / len(clean_returns)) - 1
+        if cumulative_growth > 0 else -1.0
+    )
+    sharpe = annualized_arithmetic_return / volatility if volatility != 0 else 0.0
+    return annualized_return, volatility, sharpe
+
+
+def _calculate_max_drawdown(returns: pd.Series) -> float:
+    """Calculate peak-to-trough drawdown including the initial investment value."""
+    wealth = (1 + returns.dropna()).cumprod()
+    wealth = pd.concat([pd.Series([1.0], index=[-1]), wealth])
+    return float((wealth / wealth.cummax() - 1).min()) if len(wealth) else 0.0
+
+
+def is_ucits_5_10_40_compliant(
+    prices: pd.DataFrame,
+    weights: Dict[str, float],
+    tolerance: float = 1e-8,
+) -> bool:
+    """Check the 5/10/40 limits against drifting issuer weights on each price date."""
+    valid_weights = pd.Series(weights, dtype=float).reindex(prices.columns).fillna(0.0)
+    if prices.empty or valid_weights.sum() <= 0:
+        return False
+    valid_weights = valid_weights / valid_weights.sum()
+    relative_prices = prices.div(prices.iloc[0], axis=1)
+    market_values = relative_prices.mul(valid_weights, axis=1)
+    daily_weights = market_values.div(market_values.sum(axis=1), axis=0)
+    largest_issuer_weight = daily_weights.max(axis=1)
+    total_above_five_percent = daily_weights.where(
+        daily_weights > 0.05 + tolerance,
+        0.0,
+    ).sum(axis=1)
+    return bool(
+        (largest_issuer_weight <= 0.10 + tolerance).all()
+        and (total_above_five_percent <= 0.40 + tolerance).all()
+    )
 
 
 def get_pie_chart_data(weights: Dict[str, float]) -> Tuple[List[str], List[float]]:
