@@ -1,6 +1,7 @@
 from .utils import (
     load_index_metadata,
     get_sp500_constituents,
+    get_ftse350_constituents,
     get_ticker_list_from_sheet,
     load_gics_sector_stocks,
     save_gics_sector_stocks_csv,
@@ -12,6 +13,7 @@ from .utils import (
 __all__ = [
     "load_index_metadata",
     "get_sp500_constituents",
+    "get_ftse350_constituents",
     "get_ticker_list_from_sheet",
     "load_gics_sector_stocks",
     "save_gics_sector_stocks_csv",

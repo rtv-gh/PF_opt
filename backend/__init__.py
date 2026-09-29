@@ -1,4 +1,5 @@
 from .optimizer import (
+    PortfolioOptimizationError,
     optimize_portfolio,
     max_sharpe_portfolio,
     min_variance_portfolio,

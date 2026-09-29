@@ -22,6 +22,9 @@ This project uses **Mean-Variance Optimization** to solve for the "Optimal" port
 * **PyPortfolioOpt**: For the quadratic programming optimization.
 * **Plotly**: For dynamic data visualization and risk-return plots.
 
+## Equity Markets
+The sidebar supports USA and UK universes. UK constituents are sourced from the FTSE 100 and FTSE 250 constituent tables; Yahoo Finance sector and industry metadata is mapped to GICS sector names for the sector picker. The UK snapshot is fetched and cached on first selection. To refresh it manually, run `python -m utils.update_FTSE350_tickers`.
+
 ## 📂 Project Structure
 - `app.py`: The Streamlit UI and user input handling.
 - `backend.py`: The backend engine for data cleaning and optimization math.

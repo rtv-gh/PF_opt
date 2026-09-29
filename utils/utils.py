@@ -6,6 +6,8 @@ import time
 import tempfile
 import shutil
 import logging
+import yfinance as yf
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 WIKI_SP500_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
@@ -15,6 +17,27 @@ GITHUB_SPX_RAW = "https://raw.githubusercontent.com/datasets/s-and-p-500-compani
 EXCEL_PATH = Path(__file__).resolve().parent / "equity_tickers_lists.xlsx"
 SHEET_NAME_SPX = "SPX"
 GICS_STOCKS_CSV_PATH = Path(__file__).resolve().parent / "gics_sector_stocks.csv"
+GICS_UK_STOCKS_CSV_PATH = Path(__file__).resolve().parent / "gics_sector_stocks_uk.csv"
+GICS_STOCKS_CSV_PATHS = {
+    "USA": GICS_STOCKS_CSV_PATH,
+    "UK": GICS_UK_STOCKS_CSV_PATH,
+}
+FTSE_100_URL = "https://en.wikipedia.org/wiki/FTSE_100_Index"
+FTSE_250_URL = "https://en.wikipedia.org/wiki/FTSE_250_Index"
+
+YAHOO_TO_GICS_SECTOR = {
+    "Basic Materials": "Materials",
+    "Communication Services": "Communication Services",
+    "Consumer Cyclical": "Consumer Discretionary",
+    "Consumer Defensive": "Consumer Staples",
+    "Energy": "Energy",
+    "Financial Services": "Financials",
+    "Healthcare": "Health Care",
+    "Industrials": "Industrials",
+    "Real Estate": "Real Estate",
+    "Technology": "Information Technology",
+    "Utilities": "Utilities",
+}
 
 
 # --- network helper with retries
@@ -115,6 +138,61 @@ def get_sp500_constituents(fetch_live: bool = True, use_cache_if_exists: bool = 
     raise FileNotFoundError("Unable to obtain S&P 500 constituents from network or local cache")
 
 
+def get_ftse350_constituents() -> pd.DataFrame:
+    """Fetch FTSE constituents and map Yahoo Finance sectors to GICS sector names."""
+    from io import StringIO
+
+    constituent_tables = []
+    for source_url in (FTSE_100_URL, FTSE_250_URL):
+        html = _get_html_with_retries(source_url)
+        tables = pd.read_html(StringIO(html))
+        table = _find_ftse_constituent_table(tables)
+        constituent_tables.append(table)
+
+    constituents = pd.concat(constituent_tables, ignore_index=True)
+    constituents = constituents.drop_duplicates(subset="Symbol", keep="first")
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        fetched_rows = executor.map(
+            _fetch_ftse_sector_data,
+            constituents["Symbol"],
+            constituents["Security"],
+        )
+        rows = [row for row in fetched_rows if row is not None]
+
+    result = pd.DataFrame(rows)
+    result.attrs["source_url"] = f"{FTSE_100_URL}; {FTSE_250_URL}; Yahoo Finance sector metadata"
+    if result.empty:
+        raise ValueError("No FTSE constituents with recognized Yahoo sector metadata were found")
+    return result
+
+
+def _find_ftse_constituent_table(tables: List[pd.DataFrame]) -> pd.DataFrame:
+    """Select and normalize a Wikipedia constituent table across header variations."""
+    for table in tables:
+        columns = {str(column).strip().lower(): column for column in table.columns}
+        symbol_column = next(
+            (column for name, column in columns.items() if name in {"epic", "ticker", "symbol"}),
+            None,
+        )
+        security_column = next(
+            (column for name, column in columns.items() if name in {"company", "company name", "name"}),
+            None,
+        )
+        if symbol_column is None or security_column is None:
+            continue
+
+        result = table[[symbol_column, security_column]].copy()
+        result.columns = ["Symbol", "Security"]
+        result["Symbol"] = result["Symbol"].fillna("").astype(str).str.strip().str.upper()
+        result["Symbol"] = result["Symbol"].str.replace(r"\.(?!L$)", "-", regex=True)
+        result["Symbol"] = result["Symbol"].where(
+            result["Symbol"].str.endswith(".L"), result["Symbol"] + ".L"
+        )
+        result["Security"] = result["Security"].fillna("").astype(str).str.strip()
+        return result[(result["Symbol"] != ".L") & (result["Security"] != "")]
+    raise ValueError("Could not find a recognized FTSE constituent table")
+
+
 def _normalize_gics_sector_stocks(df: pd.DataFrame) -> pd.DataFrame:
     """Normalize constituent data to a stable schema for the app and CSV snapshot."""
     data = df.copy()
@@ -135,11 +213,18 @@ def _normalize_gics_sector_stocks(df: pd.DataFrame) -> pd.DataFrame:
     return data[required + optional].sort_values(["GICS Sector", "Security", "Symbol"]).reset_index(drop=True)
 
 
-def load_gics_sector_stocks() -> pd.DataFrame:
-    """Load the saved GICS sector-to-stock dataset, falling back to the local workbook."""
+def load_gics_sector_stocks(market: str = "USA") -> pd.DataFrame:
+    """Load a market's GICS dataset, fetching UK constituents if no local snapshot exists."""
+    market = market.upper()
+    if market not in GICS_STOCKS_CSV_PATHS:
+        raise ValueError(f"Unsupported equity market: {market}")
+    csv_path = GICS_STOCKS_CSV_PATHS[market]
     try:
-        if GICS_STOCKS_CSV_PATH.exists():
-            data = pd.read_csv(GICS_STOCKS_CSV_PATH)
+        if csv_path.exists():
+            data = pd.read_csv(csv_path)
+        elif market == "UK":
+            data = get_ftse350_constituents()
+            save_gics_sector_stocks_csv(data, market=market)
         elif EXCEL_PATH.exists():
             data = pd.read_excel(EXCEL_PATH, sheet_name=SHEET_NAME_SPX)
         else:
@@ -150,30 +235,40 @@ def load_gics_sector_stocks() -> pd.DataFrame:
         return pd.DataFrame(columns=["Symbol", "Security", "GICS Sector", "GICS Sub-Industry"])
 
 
-def save_gics_sector_stocks_csv(df: Optional[pd.DataFrame] = None) -> Path:
-    """Refresh and atomically save the S&P 500 GICS dataset as a structured CSV."""
-    source_data = df if df is not None else get_sp500_constituents(fetch_live=True)
+def save_gics_sector_stocks_csv(df: Optional[pd.DataFrame] = None, market: str = "USA") -> Path:
+    """Refresh and atomically save a market's GICS dataset as a structured CSV."""
+    market = market.upper()
+    if market not in GICS_STOCKS_CSV_PATHS:
+        raise ValueError(f"Unsupported equity market: {market}")
+    source_data = df if df is not None else (
+        get_ftse350_constituents() if market == "UK" else get_sp500_constituents(fetch_live=True)
+    )
     data = _normalize_gics_sector_stocks(source_data)
     if data.empty:
-        raise ValueError("No S&P 500 GICS sector data is available to save")
+        raise ValueError(f"No {market} GICS sector data is available to save")
 
     data["Source"] = source_data.attrs.get(
-        "source_url", f"{WIKI_SP500_URL} (GitHub mirror fallback: {GITHUB_SPX_RAW})"
+        "source_url",
+        (
+            f"{FTSE_100_URL}; {FTSE_250_URL}; Yahoo Finance sector metadata"
+            if market == "UK"
+            else f"{WIKI_SP500_URL} (GitHub mirror fallback: {GITHUB_SPX_RAW})"
+        ),
     )
     data["Retrieved At"] = pd.Timestamp.now(tz="UTC").isoformat(timespec="seconds")
     with tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", newline="", delete=False,
-        dir=GICS_STOCKS_CSV_PATH.parent, suffix=".csv"
+        dir=GICS_STOCKS_CSV_PATHS[market].parent, suffix=".csv"
     ) as temp_file:
         temp_path = Path(temp_file.name)
         data.to_csv(temp_file, index=False)
     try:
-        shutil.move(str(temp_path), str(GICS_STOCKS_CSV_PATH))
+        shutil.move(str(temp_path), str(GICS_STOCKS_CSV_PATHS[market]))
     except Exception:
         temp_path.unlink(missing_ok=True)
         raise
-    logger.info("Wrote GICS sector stock data to %s", GICS_STOCKS_CSV_PATH)
-    return GICS_STOCKS_CSV_PATH
+    logger.info("Wrote GICS sector stock data to %s", GICS_STOCKS_CSV_PATHS[market])
+    return GICS_STOCKS_CSV_PATHS[market]
 
 # --- atomic Excel writer (reused from earlier)
 def write_equity_lists_excel(path: str, sheets: Dict[str, pd.DataFrame], overwrite: bool = True) -> None:
@@ -249,3 +344,23 @@ def load_index_metadata(sheet_name: str = "SPX") -> pd.DataFrame:
     cols_to_keep = [c for c in ["Symbol", "Security", "GICS Sector"] if c in df.columns]
     result = df[cols_to_keep].set_index("Symbol")
     return result
+
+
+def _fetch_ftse_sector_data(symbol: str, security: str) -> Optional[Dict[str, str]]:
+    """Fetch one UK listing's Yahoo sector and map it to a GICS sector label."""
+    try:
+        yahoo_info = yf.Ticker(symbol).info or {}
+    except Exception as error:
+        logger.warning("Could not fetch Yahoo sector metadata for %s: %s", symbol, error)
+        return None
+    yahoo_sector = yahoo_info.get("sector")
+    gics_sector = YAHOO_TO_GICS_SECTOR.get(yahoo_sector)
+    if not gics_sector:
+        logger.warning("No recognized sector metadata for %s (%s)", symbol, yahoo_sector)
+        return None
+    return {
+        "Symbol": symbol,
+        "Security": security,
+        "GICS Sector": gics_sector,
+        "GICS Sub-Industry": yahoo_info.get("industry", ""),
+    }

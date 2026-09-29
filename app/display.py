@@ -19,16 +19,25 @@ from app.config import (  # type: ignore
     PIE_CHART_WIDTH, PIE_CHART_HEIGHT,
     LINE_CHART_WIDTH, LINE_CHART_HEIGHT,
     COLUMN_WIDTH_SMALL, COLUMN_WIDTH_MEDIUM,
-    BENCHMARKS, DEFAULT_TICKERS, DEFAULT_REPORTING_CURRENCY,
-    DEFAULT_BENCHMARK
+    MARKET_CONFIGS,
 )
 from app.export import generate_portfolio_csv
 from utils import load_gics_sector_stocks
 
 
+def _reset_market_inputs() -> None:
+    """Reset market-specific ticker and random-count inputs after a market switch."""
+    market_config = MARKET_CONFIGS[st.session_state.selected_market]
+    st.session_state["manual_tickers_input"] = market_config["default_tickers"]
+    for key in list(st.session_state):
+        if key.startswith("random_count_"):
+            del st.session_state[key]
+
+
 def build_portfolio_tickers(
     manual_tickers: str,
     sector_random_counts: Dict[str, int],
+    market: str = "USA",
 ) -> List[str]:
     """Combine manual tickers with unique random constituents from each sector."""
     manual_symbols = [
@@ -38,7 +47,7 @@ def build_portfolio_tickers(
     ]
     ticker_list = list(dict.fromkeys(manual_symbols))
     selected_tickers = set(ticker_list)
-    stock_data = load_gics_sector_stocks()
+    stock_data = load_gics_sector_stocks(market)
 
     for sector, requested_count in sector_random_counts.items():
         if requested_count <= 0:
@@ -71,7 +80,16 @@ def display_sidebar_inputs() -> Tuple[
         benchmark_ticker, reporting_currency, target_return, target_risk, target_te)
         where target_return, target_risk, and target_te are optional (None if not specified by user)
     """
+    market = st.sidebar.radio(
+        "Equity market",
+        options=list(MARKET_CONFIGS),
+        horizontal=True,
+        key="selected_market",
+        on_change=_reset_market_inputs,
+    )
     st.sidebar.header("User Inputs")
+    market_config = MARKET_CONFIGS[market]
+    st.session_state.setdefault("manual_tickers_input", market_config["default_tickers"])
     enforce_ucits_5_10_40 = st.sidebar.checkbox(
         "Constrain to UCITS 5/10/40",
         value=False,
@@ -81,7 +99,13 @@ def display_sidebar_inputs() -> Tuple[
             "some otherwise-compliant portfolios."
         ),
     )
-    stocks = load_gics_sector_stocks()
+    if market == "UK":
+        with st.spinner("Loading UK equity constituents..."):
+            stocks = load_gics_sector_stocks(market)
+    else:
+        stocks = load_gics_sector_stocks(market)
+    if stocks.empty:
+        st.sidebar.error(f"No {market} stock universe is available. Check the constituent data source.")
     sectors = sorted(stocks["GICS Sector"].dropna().unique().tolist())
 
     def add_random_stocks() -> None:
@@ -89,11 +113,15 @@ def display_sidebar_inputs() -> Tuple[
             sector: int(st.session_state.get(f"random_count_{sector}", 0))
             for sector in sectors
         }
-        current_tickers = st.session_state.get("manual_tickers_input", DEFAULT_TICKERS)
-        added_tickers = build_portfolio_tickers(current_tickers, requested_counts)
+        current_tickers = st.session_state.get(
+            "manual_tickers_input", market_config["default_tickers"]
+        )
+        added_tickers = build_portfolio_tickers(current_tickers, requested_counts, market)
         st.session_state["manual_tickers_input"] = ", ".join(added_tickers)
         for sector in sectors:
-            st.session_state[f"random_count_{sector}"] = 0
+            key = f"random_count_{sector}"
+            if key in st.session_state:
+                del st.session_state[key]
 
     title_column, add_column = st.sidebar.columns([4, 1])
     title_column.subheader("Random Stocks by GICS Sector")
@@ -124,7 +152,6 @@ def display_sidebar_inputs() -> Tuple[
     st.sidebar.subheader("Manually Add Tickers")
     manual_tickers = st.sidebar.text_area(
         "Enter individual tickers (comma or newline separated)",
-        value=DEFAULT_TICKERS,
         height=100,
         key="manual_tickers_input",
     )
@@ -159,16 +186,16 @@ def display_sidebar_inputs() -> Tuple[
     st.sidebar.subheader("Benchmark")
     benchmark_name = st.sidebar.selectbox(
         "Benchmark",
-        options=list(BENCHMARKS.keys()),
-        index=list(BENCHMARKS.keys()).index(DEFAULT_BENCHMARK)
+        options=list(market_config["benchmarks"]),
+        index=list(market_config["benchmarks"]).index(market_config["default_benchmark"])
     )
-    benchmark_ticker = BENCHMARKS[benchmark_name]
+    benchmark_ticker = market_config["benchmarks"][benchmark_name]
     
     st.sidebar.subheader("Reporting currency")
     reporting_currency = st.sidebar.selectbox(
         "Reporting currency",
         options=["USD", "GBP", "EUR"],
-        index=0
+        index=["USD", "GBP", "EUR"].index(market_config["default_currency"])
     )
     
     # Optional target parameters for efficient frontier portfolios
@@ -252,7 +279,7 @@ def display_pie_chart(
                 plot_bgcolor='white',
                 paper_bgcolor='white'
             )
-            st.plotly_chart(fig_pie, use_container_width=False, key=f"pie_chart_{portfolio_type}")
+            st.plotly_chart(fig_pie, width="content", key=f"pie_chart_{portfolio_type}")
             return fig_pie
         else:
             st.warning("No stocks with positive weights in portfolio.")
@@ -456,7 +483,7 @@ def display_cumulative_returns_chart(
         legend=dict(x=0, y=1, xanchor="left", yanchor="top")
     )
     
-    st.plotly_chart(fig, use_container_width=False, key="cumulative_returns_chart")
+    st.plotly_chart(fig, width="content", key="cumulative_returns_chart")
     return fig
 
 

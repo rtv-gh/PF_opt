@@ -22,7 +22,12 @@ import numpy as np  # pyright: ignore[reportMissingImports]
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import from backend
-from backend import optimize_multiple_portfolios, get_data, get_bmk  # type: ignore
+from backend import (  # type: ignore
+    PortfolioOptimizationError,
+    optimize_multiple_portfolios,
+    get_data,
+    get_bmk,
+)
 
 # Import from app modules (absolute imports for Streamlit compatibility)
 from app import config  # type: ignore
@@ -157,6 +162,9 @@ def run_optimization(
         
         return True
         
+    except PortfolioOptimizationError as e:
+        st.error(f"❌ {e}")
+        return False
     except Exception as e:
         if enforce_ucits_5_10_40 and "infeasible" in str(e).lower():
             st.error(

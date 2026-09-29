@@ -6,6 +6,10 @@ from pypfopt import EfficientFrontier, risk_models, expected_returns, objective_
 from typing import Dict, Tuple, Optional
 
 
+class PortfolioOptimizationError(ValueError):
+    """Raised when one or more portfolio optimization requests fail."""
+
+
 def _add_ucits_constraints(ef: EfficientFrontier, prices: pd.DataFrame) -> None:
     """Constrain the portfolio to the 5/10/40 limits at every observed price date."""
     price_relatives = (prices / prices.iloc[0]).to_numpy()
@@ -263,28 +267,50 @@ def optimize_multiple_portfolios(
         - "efficient_te": Portfolio with max return at target tracking error
     
     Raises:
-        ValueError: If target values are outside achievable ranges
+        PortfolioOptimizationError: If one or more portfolio optimizations fail
     """
-    portfolios = {
-        "max_sharpe": max_sharpe_portfolio(data, ucits_5_10_40),
-        "min_variance": min_variance_portfolio(data, ucits_5_10_40),
-    }
-    
-    # Add target-based portfolios if targets are provided
+    portfolio_jobs = [
+        ("Max Sharpe", "max_sharpe", lambda: max_sharpe_portfolio(data, ucits_5_10_40)),
+        ("Minimum Variance", "min_variance", lambda: min_variance_portfolio(data, ucits_5_10_40)),
+    ]
     if target_return is not None:
-        portfolios["efficient_return"] = efficient_return_portfolio(data, target_return, ucits_5_10_40)
-    
+        portfolio_jobs.append((
+            f"Efficient Return (target return {target_return:.2%})",
+            "efficient_return",
+            lambda: efficient_return_portfolio(data, target_return, ucits_5_10_40),
+        ))
     if target_risk is not None:
-        portfolios["efficient_risk"] = efficient_risk_portfolio(data, target_risk, ucits_5_10_40)
-    
+        portfolio_jobs.append((
+            f"Efficient Risk (target risk {target_risk:.2%})",
+            "efficient_risk",
+            lambda: efficient_risk_portfolio(data, target_risk, ucits_5_10_40),
+        ))
     if target_te is not None:
-        portfolios["efficient_te"] = efficient_tracking_error_portfolio(
-            data,
-            target_te,
-            benchmark_weights=benchmark_weights,
-            ucits_5_10_40=ucits_5_10_40,
+        portfolio_jobs.append((
+            f"Efficient Tracking Error (target tracking error {target_te:.2%})",
+            "efficient_te",
+            lambda: efficient_tracking_error_portfolio(
+                data,
+                target_te,
+                benchmark_weights=benchmark_weights,
+                ucits_5_10_40=ucits_5_10_40,
+            ),
+        ))
+
+    portfolios = {}
+    failures = []
+    for display_name, portfolio_key, optimize in portfolio_jobs:
+        try:
+            portfolios[portfolio_key] = optimize()
+        except Exception as error:
+            details = "; ".join(str(argument) for argument in error.args) or str(error)
+            failures.append(f"- {display_name}: {details}")
+
+    if failures:
+        raise PortfolioOptimizationError(
+            "The following portfolio optimizations failed:\n" + "\n".join(failures)
         )
-    
+
     return portfolios
 
 

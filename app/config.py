@@ -8,17 +8,40 @@ a single source of truth for the application.
 from typing import Dict
 
 # ============================================================================
-# BENCHMARKS
+# MARKET CONFIGURATION
 # ============================================================================
+DEFAULT_TICKERS_USA = "AAPL,MA,META,V,AMZN,BA,BAC,BNY,C,GS,JPM,MS,STT,WFC,LLY,BSX,JNJ,XOM,MDT,MSFT,GOOGL,NVDA,AVGO,CRM,UNH"
+DEFAULT_TICKERS_UK = "AZN.L,HSBA.L,SHEL.L,ULVR.L,BP.L,BARC.L,REL.L,RR.L,GSK.L,NG.L"
+MARKET_CONFIGS: Dict[str, Dict] = {
+    "USA": {
+        "benchmarks": {
+            "S&P 500": "SPY",
+            "MSCI ACWI": "ACWI",
+        },
+        "default_benchmark": "S&P 500",
+        "default_currency": "USD",
+        "default_tickers": DEFAULT_TICKERS_USA,
+    },
+    "UK": {
+        "benchmarks": {
+            "FTSE 350": "^FTLC",
+            "FTSE All-Share": "^FTAS",
+        },
+        "default_benchmark": "FTSE 350",
+        "default_currency": "GBP",
+        "default_tickers": DEFAULT_TICKERS_UK,
+    },
+}
+
+# Backward-compatible USA defaults.
 BENCHMARKS: Dict[str, str] = {
-    "S&P 500": "SPY",
-    "MSCI ACWI": "ACWI"
+    **MARKET_CONFIGS["USA"]["benchmarks"]
 }
 
 # ============================================================================
 # DEFAULT VALUES
 # ============================================================================
-DEFAULT_TICKERS = "AAPL,MA,META,V,AMZN,BA,BAC,BNY,C,GS,JPM,MS,STT,WFC,LLY,BSX,JNJ,XOM,MDT,MSFT,GOOGL,NVDA,AVGO,CRM,UNH"
+DEFAULT_TICKERS = DEFAULT_TICKERS_USA
 DEFAULT_REPORTING_CURRENCY = "USD"
 DEFAULT_BENCHMARK = "S&P 500"
 
